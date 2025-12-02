@@ -1,27 +1,36 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using OmniSharp.Extensions.LanguageServer.Protocol.Models;
-using OmniSharp.Extensions.LanguageServer.Protocol.Server.Capabilities;
+﻿using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection; // <-- indispensable pour AddSingleton
+using OmniSharp.Extensions.LanguageServer.Protocol;
+using OmniSharp.Extensions.LanguageServer.Protocol.Server;
 using OmniSharp.Extensions.LanguageServer.Server;
-using XSharpLanguageServer;
 
-class Program
+namespace XSharpLanguageServer
 {
-    static async Task Main(string[] args)
+    class Program
     {
-        var server = await LanguageServer.From(options =>
-            options
-                .WithInput(Console.OpenStandardInput())
-                .WithOutput(Console.OpenStandardOutput())
-                .WithLoggerFactory(new LoggerFactory())
-                .AddDefaultLoggingProvider()
-                .WithServices(services =>
-                {
-                    // Enregistrer vos services ici si besoin
-                })
-                .WithHandler<XSharpSemanticTokensHandler>()
-        );
+        static async Task Main(string[] args)
+        {
+            var server = await LanguageServer.From(options =>
+                options.WithInput(Console.OpenStandardInput())
+                       .WithOutput(Console.OpenStandardOutput())
+                       // Enregistrer les services partagés
+                       .WithServices(services =>
+                       {
+                           // Buffer partagé pour le contenu des documents
+                           services.AddSingleton<IDictionary<DocumentUri, string>>(
+                               sp => new Dictionary<DocumentUri, string>());
 
-        await server.WaitForExit;
+                           // Logger par défaut (optionnel, sinon tu peux ensuite injecter ILogger<>)
+                           services.AddLogging();
+                       })
+                       // Enregistrer les handlers (résolus via DI, injection automatique du buffer)
+                       .WithHandler<XSharpSemanticTokensHandler>()
+                       .WithHandler<XSharpTextDocumentSyncHandler>()
+            );
+
+            await server.WaitForExit;
+        }
     }
 }

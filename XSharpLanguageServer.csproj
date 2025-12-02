@@ -18,6 +18,11 @@
     <HintPath>C:\Program Files (x86)\XSharp\Extension\Project\XSharp.VSParser.dll</HintPath>
   </Reference>
 </ItemGroup>
+  
+
+<Target Name="PostBuild" AfterTargets="PostBuildEvent">
+  <Exec Command="xcopy &quot;$(TargetDir)$(TargetName)$(TargetExt)&quot; &quot;..\xsharp-tools\server\&quot; /Y" />
+</Target>
 
 
 </Project>
