@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>xsharp_lsp_server</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <PackageReference Include="OmniSharp.Extensions.LanguageServer" Version="0.19.9" />
+  </ItemGroup>
+  
+
+<ItemGroup>
+  <Reference Include="XSharp.VSParser">
+    <HintPath>C:\Program Files (x86)\XSharp\Extension\Project\XSharp.VSParser.dll</HintPath>
+  </Reference>
+</ItemGroup>
+
+
+</Project>
