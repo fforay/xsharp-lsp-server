@@ -8,6 +8,7 @@ using OmniSharp.Extensions.LanguageServer.Protocol;
 using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
 using OmniSharp.Extensions.LanguageServer.Protocol.Document;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
+using Serilog;
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -63,7 +64,12 @@ namespace XSharpLanguageServer
             try
             {
                 if (!_documents.TryGetValue(identifier.TextDocument.Uri, out var code))
+                {
+                    _logger.LogWarning("Cannot find Document {Uri} in buffer", identifier.TextDocument.Uri);
                     return;
+                }
+
+                _logger.LogInformation("Tokenising document {Uri} (Length {Length})", identifier.TextDocument.Uri, code.Length);
 
                 string fileName = identifier.TextDocument.Uri.GetFileSystemPath();
                 var parseOptions = XSharpParseOptions.Default;
@@ -71,6 +77,9 @@ namespace XSharpLanguageServer
                 bool ok = VsParser.Lex(code, fileName, parseOptions, this, out var tokenStream, out var _);
                 var stream = tokenStream as BufferedTokenStream;
                 var tokens = stream.GetTokens();
+
+                _logger.LogInformation("After Tokenising : {Count} tokens.", tokens.Count);
+
 
                 foreach (XSharpToken token in tokens)
                 {

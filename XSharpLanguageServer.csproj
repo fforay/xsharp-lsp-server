@@ -10,6 +10,10 @@
   
   <ItemGroup>
     <PackageReference Include="OmniSharp.Extensions.LanguageServer" Version="0.19.9" />
+    <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1" />
+    <PackageReference Include="Serilog.Sinks.Debug" Version="3.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
   </ItemGroup>
   
 
@@ -21,7 +25,7 @@
   
 
 <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-  <Exec Command="xcopy &quot;$(TargetDir)$(TargetName)$(TargetExt)&quot; &quot;..\xsharp-tools\server\&quot; /Y" />
+  <Exec Command="REM xcopy &quot;$(TargetDir)&quot; &quot;..\xsharp-tools\server\&quot; /E /Y " />
 </Target>
 
 
