@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using XSharpLanguageServer.Models;
 
 namespace XSharpLanguageServer.Services
@@ -20,6 +21,14 @@ namespace XSharpLanguageServer.Services
     /// opened, all query methods return empty results so the server degrades
     /// gracefully.
     /// </para>
+    /// <para>
+    /// A <see cref="FileSystemWatcher"/> monitors the <c>.vs\</c> subtree for
+    /// <c>X#Model.xsdb</c> Created / Changed events so the server reconnects
+    /// automatically when Visual Studio flushes a fresh copy of the database
+    /// (typically every ~5 minutes) or when the file first appears after the
+    /// server started.  A 2-second debounce timer prevents thrashing during a
+    /// multi-step file write.
+    /// </para>
     /// </summary>
     public sealed class XSharpDatabaseService : IDisposable
     {
@@ -36,6 +45,24 @@ namespace XSharpLanguageServer.Services
         /// </summary>
         private string? _dbPath;
 
+        /// <summary>Workspace root supplied on first <see cref="TryConnect"/> call.</summary>
+        private string? _workspaceRoot;
+
+        /// <summary>Watches the <c>.vs\</c> subtree for DB file changes.</summary>
+        private FileSystemWatcher? _watcher;
+
+        /// <summary>
+        /// Debounce timer — fires the actual reconnect 2 s after the last
+        /// filesystem event so we don't reconnect on every write during a
+        /// multi-step flush.
+        /// </summary>
+        private Timer? _debounce;
+
+        /// <summary>Lock protecting <see cref="_connection"/> and <see cref="_dbPath"/>.</summary>
+        private readonly object _lock = new();
+
+        private const int DebounceMs = 2_000;
+
         /// <summary>Initialises the service. Called by the DI container.</summary>
         public XSharpDatabaseService(ILogger<XSharpDatabaseService> logger)
         {
@@ -48,20 +75,52 @@ namespace XSharpLanguageServer.Services
 
         /// <summary>
         /// Attempts to locate and open the <c>X#Model.xsdb</c> database that
-        /// corresponds to the given <paramref name="workspaceRoot"/> directory.
+        /// corresponds to the given <paramref name="workspaceRoot"/> directory,
+        /// then installs a <see cref="FileSystemWatcher"/> on the <c>.vs\</c>
+        /// subtree so the connection is refreshed automatically whenever VS
+        /// flushes a new copy of the database.
         /// <para>
-        /// The search walks upward from <paramref name="workspaceRoot"/> looking
-        /// for a <c>.sln</c> file, then checks
-        /// <c>.vs\&lt;solution-name&gt;\X#Model.xsdb</c>.
-        /// </para>
-        /// <para>
-        /// Safe to call multiple times — subsequent calls are ignored if a
-        /// connection is already open.
+        /// Safe to call multiple times — the watcher is only installed once.
+        /// If the DB file does not exist yet the watcher will pick it up when
+        /// it appears.
         /// </para>
         /// </summary>
         public void TryConnect(string workspaceRoot)
         {
-            if (_connection != null) return;  // already connected
+            lock (_lock)
+            {
+                // Remember root for reconnects triggered by the watcher.
+                if (_workspaceRoot == null)
+                {
+                    _workspaceRoot = workspaceRoot;
+                    StartWatcher(workspaceRoot);
+                }
+
+                ConnectCore(workspaceRoot);
+            }
+        }
+
+        /// <summary>
+        /// Closes the current connection (if any) and opens a fresh one.
+        /// Called by the debounce timer after a filesystem change event.
+        /// </summary>
+        private void Reconnect()
+        {
+            lock (_lock)
+            {
+                CloseConnection();
+                if (_workspaceRoot != null)
+                    ConnectCore(_workspaceRoot);
+            }
+        }
+
+        /// <summary>
+        /// Core connect logic — locates the DB and opens a read-only connection.
+        /// Must be called with <see cref="_lock"/> held.
+        /// </summary>
+        private void ConnectCore(string workspaceRoot)
+        {
+            if (_connection != null) return;   // already open
 
             string? dbPath = FindDatabase(workspaceRoot);
             if (dbPath == null)
@@ -95,8 +154,82 @@ namespace XSharpLanguageServer.Services
             }
         }
 
+        /// <summary>
+        /// Closes and disposes the current connection.
+        /// Must be called with <see cref="_lock"/> held.
+        /// </summary>
+        private void CloseConnection()
+        {
+            if (_connection == null) return;
+            try { _connection.Dispose(); } catch { /* ignore */ }
+            _connection = null;
+            _dbPath     = null;
+        }
+
+        // ====================================================================
+        // FileSystemWatcher
+        // ====================================================================
+
+        /// <summary>
+        /// Installs a <see cref="FileSystemWatcher"/> on the <c>.vs\</c>
+        /// subdirectory (created if it does not yet exist) to detect when
+        /// <c>X#Model.xsdb</c> is created or changed.
+        /// </summary>
+        private void StartWatcher(string workspaceRoot)
+        {
+            // Walk up to find the solution directory (same logic as FindDatabase
+            // but we want the directory even when the DB doesn't exist yet).
+            string? vsDir = FindVsDir(workspaceRoot);
+            if (vsDir == null)
+            {
+                _logger.LogDebug(
+                    "No .vs directory found under {Root} — skipping FileSystemWatcher", workspaceRoot);
+                return;
+            }
+
+            try
+            {
+                var w = new FileSystemWatcher(vsDir)
+                {
+                    Filter              = "X#Model.xsdb",
+                    IncludeSubdirectories = true,
+                    NotifyFilter        = NotifyFilters.LastWrite | NotifyFilters.FileName,
+                    EnableRaisingEvents = true,
+                };
+
+                w.Created += OnDbFileEvent;
+                w.Changed += OnDbFileEvent;
+
+                _watcher = w;
+                _logger.LogInformation(
+                    "FileSystemWatcher installed on {Dir} for X#Model.xsdb", vsDir);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not install FileSystemWatcher on {Dir}", vsDir);
+            }
+        }
+
+        private void OnDbFileEvent(object sender, FileSystemEventArgs e)
+        {
+            _logger.LogDebug("DB file event: {Type} {Path}", e.ChangeType, e.FullPath);
+
+            // Restart the debounce timer — actual reconnect fires 2 s after
+            // the last event so we don't reconnect on every write during a flush.
+            _debounce?.Dispose();
+            _debounce = new Timer(
+                _ => Reconnect(),
+                null,
+                dueTime: DebounceMs,
+                period:  Timeout.Infinite);
+        }
+
         /// <summary>Returns <c>true</c> if the database connection is open.</summary>
-        public bool IsAvailable => _connection != null;
+        public bool IsAvailable
+        {
+            get { lock (_lock) { return _connection != null; } }
+        }
 
         // ====================================================================
         // Queries
@@ -109,7 +242,9 @@ namespace XSharpLanguageServer.Services
         /// </summary>
         public IReadOnlyList<DbSymbol> FindByPrefix(string prefix, int maxResults = 100)
         {
-            if (_connection == null || string.IsNullOrEmpty(prefix))
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(prefix))
                 return Array.Empty<DbSymbol>();
 
             var results = new List<DbSymbol>();
@@ -126,7 +261,7 @@ namespace XSharpLanguageServer.Services
                     WHERE  t.Name LIKE @prefix ESCAPE '\'
                     LIMIT  @max";
 
-                using var typeCmd = new SqliteCommand(typeSql, _connection);
+                using var typeCmd = new SqliteCommand(typeSql, conn);
                 typeCmd.Parameters.AddWithValue("@prefix", EscapeLike(prefix) + "%");
                 typeCmd.Parameters.AddWithValue("@max", maxResults);
                 ReadSymbols(typeCmd, results);
@@ -142,7 +277,7 @@ namespace XSharpLanguageServer.Services
                       AND  m.IdType IS NULL
                     LIMIT  @max";
 
-                using var memberCmd = new SqliteCommand(memberSql, _connection);
+                using var memberCmd = new SqliteCommand(memberSql, conn);
                 memberCmd.Parameters.AddWithValue("@prefix", EscapeLike(prefix) + "%");
                 memberCmd.Parameters.AddWithValue("@max", maxResults);
                 ReadSymbols(memberCmd, results);
@@ -162,7 +297,9 @@ namespace XSharpLanguageServer.Services
         /// </summary>
         public IReadOnlyList<DbSymbol> GetMembersOf(string typeName)
         {
-            if (_connection == null || string.IsNullOrEmpty(typeName))
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(typeName))
                 return Array.Empty<DbSymbol>();
 
             var results = new List<DbSymbol>();
@@ -181,7 +318,7 @@ namespace XSharpLanguageServer.Services
                                LIMIT  1
                            )";
 
-                using var cmd = new SqliteCommand(sql, _connection);
+                using var cmd = new SqliteCommand(sql, conn);
                 cmd.Parameters.AddWithValue("@typeName", typeName);
                 ReadSymbols(cmd, results);
             }
@@ -200,7 +337,9 @@ namespace XSharpLanguageServer.Services
         /// </summary>
         public DbSymbol? FindExact(string name, string? currentFile = null)
         {
-            if (_connection == null || string.IsNullOrEmpty(name))
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(name))
                 return null;
 
             try
@@ -216,7 +355,7 @@ namespace XSharpLanguageServer.Services
                     ORDER  BY CASE WHEN f.FileName = @file THEN 0 ELSE 1 END
                     LIMIT  1";
 
-                using var typeCmd = new SqliteCommand(typeSql, _connection);
+                using var typeCmd = new SqliteCommand(typeSql, conn);
                 typeCmd.Parameters.AddWithValue("@name", name);
                 typeCmd.Parameters.AddWithValue("@file", currentFile ?? string.Empty);
                 var typeResult = ReadSingleSymbol(typeCmd);
@@ -233,7 +372,7 @@ namespace XSharpLanguageServer.Services
                     ORDER  BY CASE WHEN f.FileName = @file THEN 0 ELSE 1 END
                     LIMIT  1";
 
-                using var memberCmd = new SqliteCommand(memberSql, _connection);
+                using var memberCmd = new SqliteCommand(memberSql, conn);
                 memberCmd.Parameters.AddWithValue("@name", name);
                 memberCmd.Parameters.AddWithValue("@file", currentFile ?? string.Empty);
                 return ReadSingleSymbol(memberCmd);
@@ -251,7 +390,9 @@ namespace XSharpLanguageServer.Services
         /// </summary>
         public IReadOnlyList<DbSymbol> FindOverloads(string name)
         {
-            if (_connection == null || string.IsNullOrEmpty(name))
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(name))
                 return Array.Empty<DbSymbol>();
 
             var results = new List<DbSymbol>();
@@ -266,7 +407,7 @@ namespace XSharpLanguageServer.Services
                     JOIN   Files f ON f.Id = m.IdFile
                     WHERE  m.Name = @name COLLATE NOCASE";
 
-                using var cmd = new SqliteCommand(sql, _connection);
+                using var cmd = new SqliteCommand(sql, conn);
                 cmd.Parameters.AddWithValue("@name", name);
                 ReadSymbols(cmd, results);
             }
@@ -285,7 +426,9 @@ namespace XSharpLanguageServer.Services
         /// </summary>
         public IReadOnlyList<DbSymbol> FindAllByName(string name)
         {
-            if (_connection == null || string.IsNullOrEmpty(name))
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(name))
                 return Array.Empty<DbSymbol>();
 
             var results = new List<DbSymbol>();
@@ -300,7 +443,7 @@ namespace XSharpLanguageServer.Services
                     JOIN   Files f ON f.Id = t.idFile
                     WHERE  t.Name = @name COLLATE NOCASE";
 
-                using var typeCmd = new SqliteCommand(typeSql, _connection);
+                using var typeCmd = new SqliteCommand(typeSql, conn);
                 typeCmd.Parameters.AddWithValue("@name", name);
                 ReadSymbols(typeCmd, results);
 
@@ -312,7 +455,7 @@ namespace XSharpLanguageServer.Services
                     JOIN   Files f ON f.Id = m.IdFile
                     WHERE  m.Name = @name COLLATE NOCASE";
 
-                using var memberCmd = new SqliteCommand(memberSql, _connection);
+                using var memberCmd = new SqliteCommand(memberSql, conn);
                 memberCmd.Parameters.AddWithValue("@name", name);
                 ReadSymbols(memberCmd, results);
             }
@@ -349,6 +492,24 @@ namespace XSharpLanguageServer.Services
                 dir = dir.Parent;
             }
 
+            return null;
+        }
+
+        /// <summary>
+        /// Walks up from <paramref name="startDir"/> looking for a <c>.vs\</c>
+        /// subdirectory (which exists even when the DB hasn't been written yet).
+        /// Returns the first <c>.vs</c> path found, or <c>null</c>.
+        /// </summary>
+        private static string? FindVsDir(string startDir)
+        {
+            var dir = new DirectoryInfo(startDir);
+            while (dir != null)
+            {
+                string vsPath = Path.Combine(dir.FullName, ".vs");
+                if (Directory.Exists(vsPath))
+                    return vsPath;
+                dir = dir.Parent;
+            }
             return null;
         }
 
@@ -396,8 +557,13 @@ namespace XSharpLanguageServer.Services
         /// <inheritdoc/>
         public void Dispose()
         {
-            _connection?.Dispose();
-            _connection = null;
+            _debounce?.Dispose();
+            _debounce = null;
+
+            _watcher?.Dispose();
+            _watcher = null;
+
+            lock (_lock) { CloseConnection(); }
         }
     }
 }
