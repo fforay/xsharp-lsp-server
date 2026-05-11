@@ -128,6 +128,8 @@ namespace XSharpLanguageServer
                      .WithHandler<XSharpWorkspaceSymbolHandler>()
                      // Code lens: reference counts above declarations
                      .WithHandler<XSharpCodeLensHandler>()
+                     // Inlay hints: parameter name annotations at call sites
+                     .WithHandler<XSharpInlayHintsHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
