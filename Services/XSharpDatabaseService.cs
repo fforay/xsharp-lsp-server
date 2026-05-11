@@ -120,7 +120,7 @@ namespace XSharpLanguageServer.Services
                 const string typeSql = @"
                     SELECT t.Name, t.Kind, NULL AS ReturnType,
                            t.Sourcecode, t.XmlComments,
-                           f.FileName, t.StartLine, t.StartCol
+                           f.FileName, t.StartLine, t.StartColumn
                     FROM   ProjectTypes t
                     JOIN   Files f ON f.Id = t.idFile
                     WHERE  t.Name LIKE @prefix ESCAPE '\'
@@ -135,7 +135,7 @@ namespace XSharpLanguageServer.Services
                 const string memberSql = @"
                     SELECT m.Name, m.Kind, m.ReturnType,
                            m.Sourcecode, m.XmlComments,
-                           f.FileName, m.StartLine, m.StartCol
+                           f.FileName, m.StartLine, m.StartColumn
                     FROM   ProjectMembers m
                     JOIN   Files f ON f.Id = m.IdFile
                     WHERE  m.Name LIKE @prefix ESCAPE '\'
@@ -172,7 +172,7 @@ namespace XSharpLanguageServer.Services
                 const string sql = @"
                     SELECT m.Name, m.Kind, m.ReturnType,
                            m.Sourcecode, m.XmlComments,
-                           f.FileName, m.StartLine, m.StartCol
+                           f.FileName, m.StartLine, m.StartColumn
                     FROM   ProjectMembers m
                     JOIN   Files f ON f.Id = m.IdFile
                     WHERE  m.IdType = (
@@ -209,7 +209,7 @@ namespace XSharpLanguageServer.Services
                 const string typeSql = @"
                     SELECT t.Name, t.Kind, NULL AS ReturnType,
                            t.Sourcecode, t.XmlComments,
-                           f.FileName, t.StartLine, t.StartCol
+                           f.FileName, t.StartLine, t.StartColumn
                     FROM   ProjectTypes t
                     JOIN   Files f ON f.Id = t.idFile
                     WHERE  t.Name = @name COLLATE NOCASE
@@ -226,7 +226,7 @@ namespace XSharpLanguageServer.Services
                 const string memberSql = @"
                     SELECT m.Name, m.Kind, m.ReturnType,
                            m.Sourcecode, m.XmlComments,
-                           f.FileName, m.StartLine, m.StartCol
+                           f.FileName, m.StartLine, m.StartColumn
                     FROM   ProjectMembers m
                     JOIN   Files f ON f.Id = m.IdFile
                     WHERE  m.Name = @name COLLATE NOCASE
@@ -261,7 +261,7 @@ namespace XSharpLanguageServer.Services
                 const string sql = @"
                     SELECT m.Name, m.Kind, m.ReturnType,
                            m.Sourcecode, m.XmlComments,
-                           f.FileName, m.StartLine, m.StartCol
+                           f.FileName, m.StartLine, m.StartColumn
                     FROM   ProjectMembers m
                     JOIN   Files f ON f.Id = m.IdFile
                     WHERE  m.Name = @name COLLATE NOCASE";
@@ -278,9 +278,53 @@ namespace XSharpLanguageServer.Services
             return results;
         }
 
-        // ====================================================================
-        // Database location
-        // ====================================================================
+        /// <summary>
+        /// Returns every declaration of <paramref name="name"/> across all project
+        /// files — both types and members, all overloads.
+        /// Used by find-references to seed the result list with declaration sites.
+        /// </summary>
+        public IReadOnlyList<DbSymbol> FindAllByName(string name)
+        {
+            if (_connection == null || string.IsNullOrEmpty(name))
+                return Array.Empty<DbSymbol>();
+
+            var results = new List<DbSymbol>();
+
+            try
+            {
+                const string typeSql = @"
+                    SELECT t.Name, t.Kind, NULL AS ReturnType,
+                           t.Sourcecode, t.XmlComments,
+                           f.FileName, t.StartLine, t.StartColumn
+                    FROM   ProjectTypes t
+                    JOIN   Files f ON f.Id = t.idFile
+                    WHERE  t.Name = @name COLLATE NOCASE";
+
+                using var typeCmd = new SqliteCommand(typeSql, _connection);
+                typeCmd.Parameters.AddWithValue("@name", name);
+                ReadSymbols(typeCmd, results);
+
+                const string memberSql = @"
+                    SELECT m.Name, m.Kind, m.ReturnType,
+                           m.Sourcecode, m.XmlComments,
+                           f.FileName, m.StartLine, m.StartColumn
+                    FROM   ProjectMembers m
+                    JOIN   Files f ON f.Id = m.IdFile
+                    WHERE  m.Name = @name COLLATE NOCASE";
+
+                using var memberCmd = new SqliteCommand(memberSql, _connection);
+                memberCmd.Parameters.AddWithValue("@name", name);
+                ReadSymbols(memberCmd, results);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "FindAllByName failed for '{Name}'", name);
+            }
+
+            return results;
+        }
+
+
 
         /// <summary>
         /// Walks up from <paramref name="startDir"/> looking for a <c>.sln</c> file.

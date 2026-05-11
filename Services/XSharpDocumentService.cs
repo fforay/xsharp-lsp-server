@@ -157,6 +157,18 @@ namespace XSharpLanguageServer.Services
         }
 
         /// <summary>
+        /// Returns a snapshot of the URIs of all currently open documents.
+        /// Used by find-references to iterate open documents without holding the lock.
+        /// </summary>
+        public IReadOnlyList<DocumentUri> GetOpenUris()
+        {
+            lock (_lock)
+            {
+                return new List<DocumentUri>(_texts.Keys);
+            }
+        }
+
+        /// <summary>
         /// Removes all state for <paramref name="uri"/>. Called on DidClose.
         /// </summary>
         public void Remove(DocumentUri uri)

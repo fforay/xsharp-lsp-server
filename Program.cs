@@ -118,6 +118,8 @@ namespace XSharpLanguageServer
                     .WithHandler<XSharpSignatureHelpHandler>()
                     // Configuration: workspace/didChangeConfiguration
                     .WithHandler<XSharpDidChangeConfigurationHandler>()
+                    // References: textDocument/references (find all usages in open docs + DB declarations)
+                    .WithHandler<XSharpReferencesHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
