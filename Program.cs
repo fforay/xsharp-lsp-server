@@ -7,10 +7,36 @@ using System.Threading.Tasks;
 
 namespace XSharpLanguageServer
 {
+    /// <summary>
+    /// Entry point for the XSharp LSP server process.
+    /// <para>
+    /// The server communicates with the LSP client (e.g. VS Code) over
+    /// <c>stdin</c>/<c>stdout</c> using JSON-RPC, as required by the
+    /// Language Server Protocol specification.
+    /// </para>
+    /// <para>
+    /// Startup sequence:
+    /// <list type="number">
+    ///   <item>Configure Serilog logging (file or debug output).</item>
+    ///   <item>Build the OmniSharp <see cref="LanguageServer"/>, registering
+    ///         services and handlers via the DI container.</item>
+    ///   <item>Wire up the <see cref="XSharpDiagnosticsPublisher"/> into
+    ///         <see cref="XSharpDocumentService"/> — this must happen after the
+    ///         server is built because <c>ILanguageServerFacade</c> is only
+    ///         available at that point.</item>
+    ///   <item>Wait for the client to send a <c>shutdown</c> + <c>exit</c>.</item>
+    /// </list>
+    /// </para>
+    /// </summary>
     class Program
     {
         static async Task Main(string[] args)
         {
+            // ----------------------------------------------------------------
+            // Logging
+            // ----------------------------------------------------------------
+            // If XSHARPLSP_LOG_PATH is set, write a rolling daily log file there.
+            // Otherwise fall back to Debug output only (visible in a debugger).
             var logPath = Environment.GetEnvironmentVariable("XSHARPLSP_LOG_PATH");
             if (!string.IsNullOrEmpty(logPath))
             {
@@ -34,34 +60,51 @@ namespace XSharpLanguageServer
                 Log.Information("Starting XSharp Language Server");
             }
 
+            // ----------------------------------------------------------------
+            // Server setup
+            // ----------------------------------------------------------------
             var server = await LanguageServer.From(options =>
-                options.WithInput(Console.OpenStandardInput())
-                       .WithOutput(Console.OpenStandardOutput())
-                       .WithServices(services =>
-                       {
-                           services.AddLogging(builder =>
-                           {
-                               builder.ClearProviders();
-                               builder.AddSerilog(Log.Logger, dispose: true);
-                           });
+                options
+                    // Standard LSP transport: stdin for client→server messages,
+                    // stdout for server→client messages.
+                    .WithInput(Console.OpenStandardInput())
+                    .WithOutput(Console.OpenStandardOutput())
+                    .WithServices(services =>
+                    {
+                        // Route Microsoft.Extensions.Logging through Serilog.
+                        services.AddLogging(builder =>
+                        {
+                            builder.ClearProviders();
+                            builder.AddSerilog(Log.Logger, dispose: true);
+                        });
 
-                           // Core document service — owns text buffer + parse cache
-                           services.AddSingleton<XSharpDocumentService>();
+                        // Central document service: owns the text buffer and parse cache.
+                        // Registered as a singleton so all handlers share one instance.
+                        services.AddSingleton<XSharpDocumentService>();
 
-                           // Diagnostics publisher — needs ILanguageServerFacade,
-                           // which is only available after the server is built.
-                           services.AddSingleton<XSharpDiagnosticsPublisher>();
-                       })
-                       .WithHandler<XSharpTextDocumentSyncHandler>()
-                       .WithHandler<XSharpSemanticTokensHandler>()
+                        // Diagnostics publisher: sends textDocument/publishDiagnostics
+                        // notifications after each parse. Registered as a singleton and
+                        // wired into XSharpDocumentService below (after server build),
+                        // because ILanguageServerFacade is not available inside WithServices.
+                        services.AddSingleton<XSharpDiagnosticsPublisher>();
+                    })
+                    // Document sync: didOpen / didChange / didSave / didClose
+                    .WithHandler<XSharpTextDocumentSyncHandler>()
+                    // Semantic tokens: textDocument/semanticTokens/full and /range
+                    .WithHandler<XSharpSemanticTokensHandler>()
             );
 
-            // Wire the diagnostics publisher into the document service now that
-            // ILanguageServerFacade is available.
-            var docService   = server.Services.GetRequiredService<XSharpDocumentService>();
+            // ----------------------------------------------------------------
+            // Post-build wiring
+            // ----------------------------------------------------------------
+            // ILanguageServerFacade is now available. Inject the diagnostics
+            // publisher into the document service so it can push diagnostics
+            // to the client after each parse.
+            var docService    = server.Services.GetRequiredService<XSharpDocumentService>();
             var diagPublisher = server.Services.GetRequiredService<XSharpDiagnosticsPublisher>();
             docService.SetDiagnosticsPublisher(diagPublisher);
 
+            // Block until the client sends shutdown + exit.
             await server.WaitForExit;
         }
     }
