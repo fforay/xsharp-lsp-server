@@ -15,6 +15,7 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Document synchronization** — full incremental sync (open / change / save / close) with correct `\r\n` and `\n` line ending handling
 - **Document symbols** — hierarchical outline of all declared entities (namespaces, classes, interfaces, structs, enums, functions, methods, properties, events, fields, …) for the outline panel and `Ctrl+Shift+O` navigation (`textDocument/documentSymbol`)
 - **Folding ranges** — collapse classes, methods, `#region`/`#endregion` blocks, and multi-line comments (`textDocument/foldingRange`)
+- **Completion** — keyword list (all XSharp keywords and type keywords, filtered by typed prefix) plus document symbols from the current file (`textDocument/completion`)
 
 ### Planned
 
@@ -38,6 +39,7 @@ The server is built on [OmniSharp.Extensions.LanguageServer](https://github.com/
 | Semantic tokens handler | `XSharpSemanticTokensHandler.cs` | Reads parse cache, maps tokens to LSP semantic token types |
 | Document symbol handler | `XSharpDocumentSymbolHandler.cs` | Walks parse tree, returns hierarchical `DocumentSymbol[]` for outline and breadcrumbs |
 | Folding range handler | `XSharpFoldingRangeHandler.cs` | Derives fold ranges from parse tree nodes, `#region`/`#endregion` pairs, and multi-line comments |
+| Completion handler | `XSharpCompletionHandler.cs` | Keyword list (from lexer vocabulary) + document symbol identifiers, filtered by typed prefix |
 
 ### Parse pipeline
 

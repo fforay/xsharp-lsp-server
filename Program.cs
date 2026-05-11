@@ -96,6 +96,8 @@ namespace XSharpLanguageServer
                     .WithHandler<XSharpDocumentSymbolHandler>()
                     // Folding ranges: textDocument/foldingRange (collapse blocks, #region, comments)
                     .WithHandler<XSharpFoldingRangeHandler>()
+                    // Completion: textDocument/completion (keywords + document symbols)
+                    .WithHandler<XSharpCompletionHandler>()
             );
 
             // ----------------------------------------------------------------
