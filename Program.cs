@@ -126,6 +126,8 @@ namespace XSharpLanguageServer
                      .WithHandler<XSharpFormattingHandler>()
                      // Workspace symbol: workspace/symbol (project-wide symbol search)
                      .WithHandler<XSharpWorkspaceSymbolHandler>()
+                     // Code lens: reference counts above declarations
+                     .WithHandler<XSharpCodeLensHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
