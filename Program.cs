@@ -1,8 +1,11 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using OmniSharp.Extensions.LanguageServer.Protocol.Models;
+using OmniSharp.Extensions.LanguageServer.Protocol.Server;
 using OmniSharp.Extensions.LanguageServer.Server;
 using Serilog;
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace XSharpLanguageServer
@@ -82,6 +85,11 @@ namespace XSharpLanguageServer
                         // Registered as a singleton so all handlers share one instance.
                         services.AddSingleton<XSharpDocumentService>();
 
+                        // Database service: read-only access to X#Model.xsdb.
+                        // TryConnect() is called via IOnLanguageServerInitialized once
+                        // the workspace root is known from the LSP initialize request.
+                        services.AddSingleton<XSharpDatabaseService>();
+
                         // Diagnostics publisher: sends textDocument/publishDiagnostics
                         // notifications after each parse. Registered as a singleton and
                         // wired into XSharpDocumentService below (after server build),
@@ -98,6 +106,23 @@ namespace XSharpLanguageServer
                     .WithHandler<XSharpFoldingRangeHandler>()
                     // Completion: textDocument/completion (keywords + document symbols)
                     .WithHandler<XSharpCompletionHandler>()
+                    // Hover: textDocument/hover (prototype + doc comments from DB)
+                    .WithHandler<XSharpHoverHandler>()
+                    // Go-to-definition: textDocument/definition (file + line from DB)
+                    .WithHandler<XSharpGoToDefinitionHandler>()
+                    // Signature help: textDocument/signatureHelp (overloads from DB)
+                    .WithHandler<XSharpSignatureHelpHandler>()
+                    // Connect the DB service once the workspace root is known from the LSP
+                    // initialize request (rootUri preferred, rootPath as fallback).
+                    .OnInitialized((server, request, result, ct) =>
+                    {
+                        var db = server.Services.GetRequiredService<XSharpDatabaseService>();
+                        string? root = request.RootUri?.GetFileSystemPath()
+                                    ?? request.RootPath;
+                        if (!string.IsNullOrEmpty(root))
+                            db.TryConnect(root);
+                        return Task.CompletedTask;
+                    })
             );
 
             // ----------------------------------------------------------------

@@ -19,8 +19,7 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 
 ### Planned
 
-- Hover (keyword descriptions, symbol information)
-- Code completion (keywords, members, document symbols)
+- Hover (keyword descriptions, symbol information) *(parked — needs cross-file type context)*
 - Signature help (parameter hints in function calls)
 - Go to definition / find references *(requires cross-file workspace index)*
 

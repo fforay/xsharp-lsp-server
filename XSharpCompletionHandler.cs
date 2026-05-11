@@ -42,6 +42,7 @@ namespace XSharpLanguageServer
     public class XSharpCompletionHandler : CompletionHandlerBase
     {
         private readonly XSharpDocumentService _documentService;
+        private readonly XSharpDatabaseService _dbService;
         private readonly ILogger<XSharpCompletionHandler> _logger;
 
         /// <summary>
@@ -54,9 +55,11 @@ namespace XSharpLanguageServer
         /// <summary>Initialises the handler. Called by the DI container.</summary>
         public XSharpCompletionHandler(
             XSharpDocumentService documentService,
+            XSharpDatabaseService dbService,
             ILogger<XSharpCompletionHandler> logger)
         {
             _documentService = documentService;
+            _dbService       = dbService;
             _logger          = logger;
         }
 
@@ -119,6 +122,42 @@ namespace XSharpLanguageServer
                     && parsed.Tree != null)
                 {
                     CollectSymbolItems(parsed.Tree, prefix, items, cancellationToken);
+                }
+
+                // ----------------------------------------------------------------
+                // 3. DB cross-file symbols — types and global members by prefix.
+                //    Also check for member-access trigger ('.' or ':') to provide
+                //    member completion.
+                // ----------------------------------------------------------------
+                if (_dbService.IsAvailable)
+                {
+                    string? memberTypeName = GetMemberAccessType(
+                        request.TextDocument.Uri, request.Position);
+
+                    if (memberTypeName != null)
+                    {
+                        // Member access: foo. or foo: → return members of the type
+                        var members = _dbService.GetMembersOf(memberTypeName);
+                        var seen    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var sym in members)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (seen.Add(sym.Name))
+                                items.Add(DbSymbolToCompletionItem(sym));
+                        }
+                    }
+                    else if (prefix.Length >= 2)
+                    {
+                        // Prefix lookup — only activate for ≥2 chars to limit noise
+                        var dbSymbols = _dbService.FindByPrefix(prefix);
+                        var seen      = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var sym in dbSymbols)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (seen.Add(sym.Name))
+                                items.Add(DbSymbolToCompletionItem(sym));
+                        }
+                    }
                 }
 
                 _logger.LogInformation(
@@ -342,5 +381,74 @@ namespace XSharpLanguageServer
 
             return builder.ToImmutable();
         }
+
+        // ====================================================================
+        // DB helpers
+        // ====================================================================
+
+        /// <summary>
+        /// Scans leftward from <paramref name="cursor"/> to detect a member-access
+        /// expression of the form <c>identifier.</c> or <c>identifier:</c>.
+        /// Returns the identifier (potential type name) if found, otherwise <c>null</c>.
+        /// </summary>
+        private string? GetMemberAccessType(DocumentUri uri, Position cursor)
+        {
+            if (!_documentService.TryGetText(uri, out var text))
+                return null;
+
+            int offset = GetOffset(text, cursor.Line, cursor.Character);
+            if (offset < 2) return null;
+
+            // The character immediately before the cursor should be '.' or ':'
+            char trigger = text[offset - 1];
+            if (trigger != '.' && trigger != ':') return null;
+
+            // Scan backwards over the identifier before the trigger
+            int end = offset - 1;
+            int start = end;
+            while (start > 0 && IsWordChar(text[start - 1]))
+                start--;
+
+            if (start == end) return null;   // nothing before the trigger
+
+            return text.Substring(start, end - start);
+        }
+
+        /// <summary>
+        /// Converts a <see cref="DbSymbol"/> into a <see cref="CompletionItem"/>.
+        /// The sort text is prefixed with <c>~</c> so DB items appear after
+        /// keyword and in-file items.
+        /// </summary>
+        private static CompletionItem DbSymbolToCompletionItem(DbSymbol sym)
+        {
+            var kind = sym.Kind switch
+            {
+                1  => CompletionItemKind.Class,       // Class
+                2  => CompletionItemKind.Method,      // Method
+                3  => CompletionItemKind.Property,    // Access/Assign
+                4  => CompletionItemKind.Field,       // Field / iVar
+                5  => CompletionItemKind.Function,    // Function
+                6  => CompletionItemKind.Function,    // Procedure
+                7  => CompletionItemKind.Variable,    // Global
+                8  => CompletionItemKind.Interface,   // Interface
+                9  => CompletionItemKind.Struct,      // Structure
+                10 => CompletionItemKind.Enum,        // Enum
+                11 => CompletionItemKind.EnumMember,  // Enum member
+                _  => CompletionItemKind.Value,
+            };
+
+            return new CompletionItem
+            {
+                Label            = sym.Name,
+                Kind             = kind,
+                Detail           = sym.ReturnType ?? sym.FileName,
+                Documentation    = sym.XmlComments != null
+                    ? new StringOrMarkupContent(sym.XmlComments)
+                    : null,
+                SortText         = "~" + sym.Name,   // sorts after keywords/in-file items
+                InsertText       = sym.Name,
+            };
+        }
     }
 }
+
