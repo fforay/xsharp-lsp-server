@@ -20,7 +20,8 @@ namespace XSharpLanguageServer.Handlers
     /// <summary>
     /// Handles the <c>textDocument/completion</c> LSP request.
     /// <para>
-    /// Provides two categories of completion items:
+    /// Provides three categories of completion items, merged into a single
+    /// deduplicated list via a shared <see cref="HashSet{T}"/>:
     /// <list type="number">
     ///   <item>
     ///     <b>Keywords</b> — all XSharp keywords and type keywords, built once at startup
@@ -31,14 +32,14 @@ namespace XSharpLanguageServer.Handlers
     ///   <item>
     ///     <b>Document symbols</b> — identifiers declared in the current file
     ///     (classes, methods, functions, fields, …) extracted by walking the parse tree.
-    ///     These complement the keyword list so the user can quickly jump to any name
-    ///     visible in the file.
+    ///   </item>
+    ///   <item>
+    ///     <b>DB cross-file symbols</b> — types and global members from the XSharp
+    ///     IntelliSense database, filtered by prefix or by member type on <c>.</c>/<c>:</c>.
     ///   </item>
     /// </list>
-    /// </para>
-    /// <para>
-    /// The prefix is extracted from the document text at the cursor position by scanning
-    /// backwards for the start of the current word.
+    /// A single <see cref="HashSet{T}"/> (case-insensitive) is shared across all three
+    /// passes so a name that appears in more than one source is only emitted once.
     /// </para>
     /// </summary>
     public class XSharpCompletionHandler : CompletionHandlerBase
@@ -103,6 +104,11 @@ namespace XSharpLanguageServer.Handlers
 
                 var items = new List<CompletionItem>();
 
+                // Single seen-set shared across all three passes — ensures a name
+                // that appears in keywords, in-file symbols, AND the DB is only
+                // emitted once (first occurrence wins, in priority order).
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
                 // ----------------------------------------------------------------
                 // 1. Keywords — filter by prefix (case-insensitive).
                 // ----------------------------------------------------------------
@@ -113,7 +119,8 @@ namespace XSharpLanguageServer.Handlers
                     if (prefix.Length == 0
                         || kw.Label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                     {
-                        items.Add(kw);
+                        if (seen.Add(kw.Label))
+                            items.Add(kw);
                     }
                 }
 
@@ -123,7 +130,7 @@ namespace XSharpLanguageServer.Handlers
                 if (_documentService.TryGetParsed(request.TextDocument.Uri, out var parsed)
                     && parsed.Tree != null)
                 {
-                    CollectSymbolItems(parsed.Tree, prefix, items, cancellationToken);
+                    CollectSymbolItems(parsed.Tree, prefix, items, cancellationToken, seen);
                 }
 
                 // ----------------------------------------------------------------
@@ -140,7 +147,6 @@ namespace XSharpLanguageServer.Handlers
                     {
                         // Member access: foo. or foo: → return members of the type
                         var members = _dbService.GetMembersOf(memberTypeName);
-                        var seen    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var sym in members)
                         {
                             cancellationToken.ThrowIfCancellationRequested();
@@ -152,7 +158,6 @@ namespace XSharpLanguageServer.Handlers
                     {
                         // Prefix lookup — only activate for ≥2 chars to limit noise
                         var dbSymbols = _dbService.FindByPrefix(prefix);
-                        var seen      = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var sym in dbSymbols)
                         {
                             cancellationToken.ThrowIfCancellationRequested();

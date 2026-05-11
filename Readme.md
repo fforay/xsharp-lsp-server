@@ -12,18 +12,26 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 
 - **Semantic syntax highlighting** — tokens classified into: keyword, type, modifier, macro (preprocessor directives), comment, string, number, operator, variable
 - **Diagnostics** — syntax errors and warnings from the XSharp parser are pushed to the editor as squiggly underlines (`textDocument/publishDiagnostics`)
-- **Document synchronization** — full incremental sync (open / change / save / close) with correct `\r\n` and `\n` line ending handling
+- **Document synchronization** — full incremental sync (open / change / save / close) with correct `\r\n` and `\n` line ending handling (`textDocument/didOpen`, `didChange`, `didSave`, `didClose`)
 - **Document symbols** — hierarchical outline of all declared entities (namespaces, classes, interfaces, structs, enums, functions, methods, properties, events, fields, …) for the outline panel and `Ctrl+Shift+O` navigation (`textDocument/documentSymbol`)
 - **Folding ranges** — collapse classes, methods, `#region`/`#endregion` blocks, and multi-line comments (`textDocument/foldingRange`)
 - **Completion** — keywords (from lexer vocabulary) + document symbols from the current file + cross-file type/member lookup from the IntelliSense database, filtered by typed prefix; member completion after `.` and `:` (`textDocument/completion`)
 - **Hover** — prototype and XML doc comments for the symbol under the cursor, sourced from the IntelliSense database (`textDocument/hover`)
 - **Go to definition** — jumps to the file and line where a symbol is declared, sourced from the IntelliSense database (`textDocument/definition`)
 - **Signature help** — parameter hints for all overloads of a function call, sourced from the IntelliSense database (`textDocument/signatureHelp`)
+- **Configurable dialect and include paths** — dialect (Core, VO, Vulcan, Harbour, …), include paths, and preprocessor symbols read from `workspace/didChangeConfiguration`; changes trigger a full reparse (`workspace/didChangeConfiguration`)
+- **Find references** — locates all usages of the identifier under the cursor across all currently open documents; declaration sites also returned from the IntelliSense database when requested (`textDocument/references`)
+- **Rename symbol** — renames every occurrence of the identifier under the cursor across all currently open documents; returns a `WorkspaceEdit` for atomic client-side apply (`textDocument/rename`)
+- **Document formatting** — uppercases all XSharp keywords to their canonical spelling and normalises indentation using client-supplied tab size / insert-spaces options; keyword map is built automatically from `XSharpLexer` reflection (221 entries) (`textDocument/formatting`)
+- **Auto-reconnect to IntelliSense database** — a `FileSystemWatcher` monitors the `.vs/` subtree for `X#Model.xsdb` Created/Changed events and reconnects automatically when VS flushes a new copy of the database (typically every ~5 minutes) or when the file first appears after server startup
 
 ### Planned
 
-- Find references *(requires cross-file workspace index)*
-- Configurable XSharp dialect and include paths via LSP workspace settings
+- Completion deduplication across keywords, in-file symbols, and DB results
+- Hover tooltips for built-in keywords
+- `workspace/symbol` — project-wide symbol search
+- Code lens — reference counts above declarations
+- Inlay hints — inline type annotations
 
 ---
 
@@ -44,13 +52,19 @@ XSharpLanguageServer/
 │   ├── XSharpCompletionHandler.cs
 │   ├── XSharpHoverHandler.cs
 │   ├── XSharpGoToDefinitionHandler.cs
-│   └── XSharpSignatureHelpHandler.cs
+│   ├── XSharpSignatureHelpHandler.cs
+│   ├── XSharpDidChangeConfigurationHandler.cs
+│   ├── XSharpReferencesHandler.cs
+│   ├── XSharpRenameHandler.cs
+│   └── XSharpFormattingHandler.cs
 ├── Services/                — singleton services shared by all handlers
-│   ├── XSharpDocumentService.cs       — text buffer + parse cache
-│   ├── XSharpDatabaseService.cs       — read-only access to X#Model.xsdb
-│   └── XSharpDiagnosticsPublisher.cs  — pushes diagnostics to the client
+│   ├── XSharpDocumentService.cs       — text buffer + parse cache + FindTokenLocations
+│   ├── XSharpDatabaseService.cs       — read-only access to X#Model.xsdb + auto-reconnect
+│   ├── XSharpDiagnosticsPublisher.cs  — pushes diagnostics to the client
+│   └── XSharpConfigurationService.cs  — workspace settings + XSharpParseOptions factory
 └── Models/
-    └── DbSymbol.cs          — data-transfer object returned by database queries
+    ├── DbSymbol.cs                — data-transfer object returned by database queries
+    └── XSharpWorkspaceSettings.cs — workspace configuration DTO
 ```
 
 ### Component responsibilities
@@ -58,8 +72,9 @@ XSharpLanguageServer/
 | Component | Namespace | Role |
 |---|---|---|
 | `Program.cs` | `XSharpLanguageServer` | Server bootstrap, DI wiring, Serilog logging |
-| `XSharpDocumentService` | `.Services` | Central singleton: text buffer + parse cache (token stream, parse tree, diagnostics) per document |
-| `XSharpDatabaseService` | `.Services` | Read-only SQLite access to `X#Model.xsdb`; located automatically from the LSP `rootUri` at initialisation |
+| `XSharpDocumentService` | `.Services` | Central singleton: text buffer + parse cache (token stream, parse tree, diagnostics) per document; `FindTokenLocations()` shared helper for references and rename |
+| `XSharpDatabaseService` | `.Services` | Read-only SQLite access to `X#Model.xsdb`; located automatically from the LSP `rootUri`; `FileSystemWatcher` reconnects automatically when VS refreshes the file |
+| `XSharpConfigurationService` | `.Services` | Parses `workspace/didChangeConfiguration` payload; builds `XSharpParseOptions` from dialect, include paths, and preprocessor symbols |
 | `XSharpDiagnosticsPublisher` | `.Services` | Pushes errors/warnings to the client after each parse |
 | `XSharpTextDocumentSyncHandler` | `.Handlers` | Handles `didOpen/Change/Save/Close`, triggers re-parse |
 | `XSharpSemanticTokensHandler` | `.Handlers` | Reads parse cache, maps tokens to LSP semantic token types |
@@ -69,7 +84,12 @@ XSharpLanguageServer/
 | `XSharpHoverHandler` | `.Handlers` | Prototype + XML doc comment for the word under the cursor |
 | `XSharpGoToDefinitionHandler` | `.Handlers` | File + line from the DB for the word under the cursor |
 | `XSharpSignatureHelpHandler` | `.Handlers` | All overloads of the enclosing call from the DB |
+| `XSharpDidChangeConfigurationHandler` | `.Handlers` | Applies updated workspace settings and triggers a full reparse |
+| `XSharpReferencesHandler` | `.Handlers` | Scans open-document token streams for usages; adds DB declaration sites when requested |
+| `XSharpRenameHandler` | `.Handlers` | Finds all token occurrences via `FindTokenLocations()`, returns `WorkspaceEdit` |
+| `XSharpFormattingHandler` | `.Handlers` | Uppercases keywords, normalises indentation; keyword map built from `XSharpLexer` reflection |
 | `DbSymbol` | `.Models` | DTO returned by all database query methods |
+| `XSharpWorkspaceSettings` | `.Models` | DTO for dialect, include paths, and preprocessor symbols |
 
 ### Parse pipeline
 
@@ -91,7 +111,7 @@ VsParser.Parse()  ──►  token stream + parse tree + diagnostics
 
 The XSharp Visual Studio extension maintains a SQLite database (`X#Model.xsdb`) under `.vs/<solution-name>/` that stores all project symbols (types, members, globals) with their prototypes, file locations, and XML doc comments.
 
-`XSharpDatabaseService` opens this database in **read-only** mode. It is located automatically by walking up from the LSP workspace root to find a `.sln` file. If the database is not found, all DB-backed features (hover, go-to-definition, signature help, cross-file completion) degrade gracefully — in-file features continue to work.
+`XSharpDatabaseService` opens this database in **read-only** mode. It is located automatically by walking up from the LSP workspace root to find a `.sln` file. A `FileSystemWatcher` on the `.vs/` subtree detects when VS flushes a fresh copy and reconnects automatically after a 2-second debounce. If the database is not found, all DB-backed features (hover, go-to-definition, signature help, cross-file completion, find references) degrade gracefully — in-file features continue to work.
 
 ---
 
