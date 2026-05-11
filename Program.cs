@@ -124,6 +124,8 @@ namespace XSharpLanguageServer
                      .WithHandler<XSharpRenameHandler>()
                      // Formatting: textDocument/formatting (keyword casing + indentation)
                      .WithHandler<XSharpFormattingHandler>()
+                     // Workspace symbol: workspace/symbol (project-wide symbol search)
+                     .WithHandler<XSharpWorkspaceSymbolHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
