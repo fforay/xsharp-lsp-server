@@ -122,6 +122,8 @@ namespace XSharpLanguageServer
                      .WithHandler<XSharpReferencesHandler>()
                      // Rename: textDocument/rename (rename symbol across all open docs)
                      .WithHandler<XSharpRenameHandler>()
+                     // Formatting: textDocument/formatting (keyword casing + indentation)
+                     .WithHandler<XSharpFormattingHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
