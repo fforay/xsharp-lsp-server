@@ -538,8 +538,8 @@ namespace XSharpLanguageServer.Services
             Sourcecode  = r.IsDBNull(3) ? null         : r.GetString(3),
             XmlComments = r.IsDBNull(4) ? null         : r.GetString(4),
             FileName    = r.IsDBNull(5) ? null         : r.GetString(5),
-            // DB lines are 1-based; LSP is 0-based.
-            StartLine   = r.IsDBNull(6) ? 0            : Math.Max(0, r.GetInt32(6) - 1),
+            // DB lines are 0-based (verified empirically).
+            StartLine   = r.IsDBNull(6) ? 0            : r.GetInt32(6),
             StartCol    = r.IsDBNull(7) ? 0            : r.GetInt32(7),
         };
 
