@@ -13,14 +13,14 @@ namespace XSharpLanguageServer
 {
     public class XSharpTextDocumentSyncHandler : TextDocumentSyncHandlerBase
     {
-        private readonly IDictionary<DocumentUri, string> _documents;
-        private readonly ILanguageServerFacade _server; // injecté par le framework
+        private readonly XSharpDocumentService _documentService;
+        private readonly ILanguageServerFacade _server;
 
         public XSharpTextDocumentSyncHandler(
-            IDictionary<DocumentUri, string> documents,
+            XSharpDocumentService documentService,
             ILanguageServerFacade server)
         {
-            _documents = documents;
+            _documentService = documentService;
             _server = server;
         }
 
@@ -41,24 +41,24 @@ namespace XSharpLanguageServer
 
         public override Task<Unit> Handle(DidOpenTextDocumentParams request, CancellationToken cancellationToken)
         {
-            _documents[request.TextDocument.Uri] = request.TextDocument.Text ?? string.Empty;
+            _documentService.UpdateText(
+                request.TextDocument.Uri,
+                request.TextDocument.Text ?? string.Empty);
+
             return Unit.Task;
         }
 
-
         public override Task<Unit> Handle(DidChangeTextDocumentParams request, CancellationToken cancellationToken)
         {
-            if (!_documents.ContainsKey(request.TextDocument.Uri))
-                _documents[request.TextDocument.Uri] = string.Empty;
-
-            var oldText = _documents[request.TextDocument.Uri];
+            if (!_documentService.TryGetText(request.TextDocument.Uri, out var oldText))
+                oldText = string.Empty;
 
             foreach (var change in request.ContentChanges)
             {
                 oldText = ApplyChange(oldText, change);
             }
 
-            _documents[request.TextDocument.Uri] = oldText;
+            _documentService.UpdateText(request.TextDocument.Uri, oldText);
 
             _server?.SendNotification("workspace/semanticTokens/refresh");
 
@@ -67,7 +67,7 @@ namespace XSharpLanguageServer
 
         public override Task<Unit> Handle(DidCloseTextDocumentParams request, CancellationToken cancellationToken)
         {
-            _documents.Remove(request.TextDocument.Uri);
+            _documentService.Remove(request.TextDocument.Uri);
             return Unit.Task;
         }
 
@@ -75,61 +75,64 @@ namespace XSharpLanguageServer
         {
             if (request.Text != null)
             {
-                _documents[request.TextDocument.Uri] = request.Text;
+                _documentService.UpdateText(request.TextDocument.Uri, request.Text);
             }
 
             _server.SendNotification("workspace/semanticTokens/refresh");
             return Unit.Task;
         }
 
-
-        private string ApplyChange(string oldText, TextDocumentContentChangeEvent change)
+        /// <summary>
+        /// Applies a single LSP incremental change to the document text.
+        /// Handles both \n and \r\n line endings correctly.
+        /// </summary>
+        private static string ApplyChange(string oldText, TextDocumentContentChangeEvent change)
         {
-            // Si Range est null, VSCode envoie le document complet
+            // Full document replacement
             if (change.Range == null)
-            {
                 return change.Text;
-            }
 
-            var lines = oldText.Split('\n').ToList();
+            // Normalise to \n for internal processing, remembering the original ending
+            bool hasCr = oldText.Contains('\r');
+            string normalised = hasCr ? oldText.Replace("\r\n", "\n").Replace("\r", "\n") : oldText;
 
-            var startLine = change.Range.Start.Line;
-            var startChar = change.Range.Start.Character;
-            var endLine = change.Range.End.Line;
-            var endChar = change.Range.End.Character;
+            var lines = normalised.Split('\n').ToList();
 
-            // Partie avant la modification
-            var before = lines[startLine].Substring(0, startChar);
+            int startLine = change.Range.Start.Line;
+            int startChar = change.Range.Start.Character;
+            int endLine   = change.Range.End.Line;
+            int endChar   = change.Range.End.Character;
 
-            // Partie après la modification
-            var after = lines[endLine].Substring(endChar);
+            // Guard against out-of-range positions (can happen with rapid edits)
+            startLine = System.Math.Min(startLine, lines.Count - 1);
+            endLine   = System.Math.Min(endLine,   lines.Count - 1);
+            startChar = System.Math.Min(startChar, lines[startLine].Length);
+            endChar   = System.Math.Min(endChar,   lines[endLine].Length);
 
-            // Supprimer les lignes affectées
+            string before = lines[startLine][..startChar];
+            string after  = lines[endLine][endChar..];
+
             lines.RemoveRange(startLine, endLine - startLine + 1);
 
-            // Insérer la nouvelle ligne (avant + texte inséré + après)
-            var newTextLines = change.Text.Split('\n');
+            // Normalise the inserted text the same way
+            string insertNormalised = change.Text.Replace("\r\n", "\n").Replace("\r", "\n");
+            var newLines = insertNormalised.Split('\n');
 
-            if (newTextLines.Length == 1)
+            if (newLines.Length == 1)
             {
-                lines.Insert(startLine, before + newTextLines[0] + after);
+                lines.Insert(startLine, before + newLines[0] + after);
             }
             else
             {
-                // Première ligne = before + première ligne du texte inséré
-                lines.Insert(startLine, before + newTextLines[0]);
-
-                // Lignes intermédiaires
-                for (int i = 1; i < newTextLines.Length - 1; i++)
-                {
-                    lines.Insert(startLine + i, newTextLines[i]);
-                }
-
-                // Dernière ligne = dernière ligne du texte inséré + after
-                lines.Insert(startLine + newTextLines.Length - 1, newTextLines.Last() + after);
+                lines.Insert(startLine, before + newLines[0]);
+                for (int i = 1; i < newLines.Length - 1; i++)
+                    lines.Insert(startLine + i, newLines[i]);
+                lines.Insert(startLine + newLines.Length - 1, newLines[^1] + after);
             }
 
-            return string.Join("\n", lines);
+            // Restore original line endings
+            string result = string.Join("\n", lines);
+            return hasCr ? result.Replace("\n", "\r\n") : result;
         }
     }
 }

@@ -1,32 +1,26 @@
-using LanguageService.CodeAnalysis.Text;
-using LanguageService.CodeAnalysis.XSharp;
 using LanguageService.CodeAnalysis.XSharp.SyntaxParser;
 using LanguageService.SyntaxTree;
-using MediatR;
 using Microsoft.Extensions.Logging;
-using OmniSharp.Extensions.LanguageServer.Protocol;
 using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
 using OmniSharp.Extensions.LanguageServer.Protocol.Document;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
-using Serilog;
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using XSharp.Parser;
 
 namespace XSharpLanguageServer
 {
-    public class XSharpSemanticTokensHandler : SemanticTokensHandlerBase, VsParser.IErrorListener
+    public class XSharpSemanticTokensHandler : SemanticTokensHandlerBase
     {
         private readonly ILogger<XSharpSemanticTokensHandler> _logger;
-        private readonly IDictionary<DocumentUri, string> _documents;
+        private readonly XSharpDocumentService _documentService;
 
         public XSharpSemanticTokensHandler(
-            IDictionary<DocumentUri, string> documents,
-            ILogger<XSharpSemanticTokensHandler> logger = null)
+            XSharpDocumentService documentService,
+            ILogger<XSharpSemanticTokensHandler> logger)
         {
-            _documents = documents;
+            _documentService = documentService;
             _logger = logger;
         }
 
@@ -63,47 +57,93 @@ namespace XSharpLanguageServer
         {
             try
             {
-                if (!_documents.TryGetValue(identifier.TextDocument.Uri, out var code))
+                if (!_documentService.TryGetParsed(identifier.TextDocument.Uri, out var parsed)
+                    || parsed.TokenStream == null)
                 {
-                    _logger.LogWarning("Cannot find Document {Uri} in buffer", identifier.TextDocument.Uri);
+                    _logger.LogWarning("No parse result for {Uri}", identifier.TextDocument.Uri);
                     return;
                 }
 
-                _logger.LogInformation("Tokenising document {Uri} (Length {Length})", identifier.TextDocument.Uri, code.Length);
+                var stream = parsed.TokenStream as BufferedTokenStream;
+                if (stream == null) return;
 
-                string fileName = identifier.TextDocument.Uri.GetFileSystemPath();
-                var parseOptions = XSharpParseOptions.Default;
-
-                bool ok = VsParser.Lex(code, fileName, parseOptions, this, out var tokenStream, out var _);
-                var stream = tokenStream as BufferedTokenStream;
+                // GetTokens(true) includes tokens on all channels (hidden, comments, etc.)
                 var tokens = stream.GetTokens();
 
-                _logger.LogInformation("After Tokenising : {Count} tokens.", tokens.Count);
-
+                _logger.LogInformation("Tokenising {Uri}: {Count} tokens", identifier.TextDocument.Uri, tokens.Count);
 
                 foreach (XSharpToken token in tokens)
                 {
-                    string tokenType = string.Empty;
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                    if (XSharpLexer.IsKeyword(token.Type)) tokenType = SemanticTokenType.Keyword;
-                    else if (XSharpLexer.IsIdentifier(token.Type)) tokenType = SemanticTokenType.Variable;
-                    else if (XSharpLexer.IsComment(token.Type)) tokenType = SemanticTokenType.Comment;
-                    else if (XSharpLexer.IsModifier(token.Type)) tokenType = SemanticTokenType.Modifier;
-                    else if (XSharpLexer.IsString(token.Type)) tokenType = SemanticTokenType.String;
+                    string? tokenType = ClassifyToken(token);
+                    if (tokenType == null) continue;
 
-                    if (!string.IsNullOrEmpty(tokenType))
-                    {
-                        builder.Push(token.Line - 1, token.Column, token.Text.Length, tokenType, Array.Empty<string>());
-                    }
+                    // LSP lines are 0-based; XSharp token lines are 1-based
+                    int line = token.Line - 1;
+                    int col  = token.Column;
+                    int len  = token.Text?.Length ?? 0;
+
+                    if (line < 0 || len <= 0) continue;
+
+                    builder.Push(line, col, len, tokenType, Array.Empty<string>());
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // Normal cancellation — do not log as error
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Erreur lors de la tokenization");
+                _logger.LogError(ex, "Tokenization failed for {Uri}", identifier.TextDocument.Uri);
             }
         }
 
-        public void ReportError(string fileName, LinePositionSpan span, string errorCode, string message, object[] args) { }
-        public void ReportWarning(string fileName, LinePositionSpan span, string errorCode, string message, object[] args) { }
+        /// <summary>
+        /// Maps an XSharp token type to an LSP SemanticTokenType string.
+        /// Returns null for tokens that should not be highlighted.
+        /// </summary>
+        private static string? ClassifyToken(XSharpToken token)
+        {
+            int type = token.Type;
+
+            // Comments (check before keyword so DOC_COMMENT is handled here)
+            if (XSharpLexer.IsComment(type))
+                return SemanticTokenType.Comment;
+
+            // Preprocessor directives (#define, #include, #ifdef, …)
+            if (XSharpLexer.IsPPKeyword(type))
+                return SemanticTokenType.Macro;
+
+            // Built-in type keywords (STRING, INT, DWORD, OBJECT, …)
+            if (XSharpLexer.IsType(type))
+                return SemanticTokenType.Type;
+
+            // Modifier keywords (PUBLIC, PRIVATE, PROTECTED, STATIC, VIRTUAL, …)
+            if (XSharpLexer.IsModifier(type))
+                return SemanticTokenType.Modifier;
+
+            // All other keywords
+            if (XSharpLexer.IsKeyword(type))
+                return SemanticTokenType.Keyword;
+
+            // String literals (all variants: bracketed, interpolated, escaped, …)
+            if (XSharpLexer.IsString(type))
+                return SemanticTokenType.String;
+
+            // Numeric, boolean, date, and other literal constants
+            if (XSharpLexer.IsLiteral(type))
+                return SemanticTokenType.Number;
+
+            // Identifiers
+            if (XSharpLexer.IsIdentifier(type))
+                return SemanticTokenType.Variable;
+
+            // Operators
+            if (XSharpLexer.IsOperator(type))
+                return SemanticTokenType.Operator;
+
+            return null;
+        }
     }
 }
