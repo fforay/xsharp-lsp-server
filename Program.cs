@@ -5,6 +5,7 @@ using OmniSharp.Extensions.LanguageServer.Protocol.Server;
 using OmniSharp.Extensions.LanguageServer.Server;
 using Serilog;
 using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using XSharpLanguageServer.Handlers;
@@ -85,6 +86,7 @@ namespace XSharpLanguageServer
 
                         // Central document service: owns the text buffer and parse cache.
                         // Registered as a singleton so all handlers share one instance.
+                        services.AddSingleton<XSharpConfigurationService>();
                         services.AddSingleton<XSharpDocumentService>();
 
                         // Database service: read-only access to X#Model.xsdb.
@@ -114,6 +116,8 @@ namespace XSharpLanguageServer
                     .WithHandler<XSharpGoToDefinitionHandler>()
                     // Signature help: textDocument/signatureHelp (overloads from DB)
                     .WithHandler<XSharpSignatureHelpHandler>()
+                    // Configuration: workspace/didChangeConfiguration
+                    .WithHandler<XSharpDidChangeConfigurationHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>

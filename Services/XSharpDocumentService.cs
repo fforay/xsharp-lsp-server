@@ -84,6 +84,7 @@ namespace XSharpLanguageServer.Services
     public sealed class XSharpDocumentService
     {
         private readonly ILogger<XSharpDocumentService> _logger;
+        private readonly XSharpConfigurationService _configService;
 
         /// <summary>
         /// Optional publisher wired in after server startup.
@@ -107,9 +108,12 @@ namespace XSharpLanguageServer.Services
         /// <summary>
         /// Initialises the service. Called by the DI container.
         /// </summary>
-        public XSharpDocumentService(ILogger<XSharpDocumentService> logger)
+        public XSharpDocumentService(
+            ILogger<XSharpDocumentService> logger,
+            XSharpConfigurationService configService)
         {
-            _logger = logger;
+            _logger        = logger;
+            _configService = configService;
         }
 
         /// <summary>
@@ -164,6 +168,27 @@ namespace XSharpLanguageServer.Services
             }
         }
 
+        /// <summary>
+        /// Re-parses every currently open document using the latest
+        /// <see cref="XSharpConfigurationService.GetParseOptions"/>.
+        /// Called when workspace settings change so diagnostics and features
+        /// immediately reflect the new dialect / include paths / defines.
+        /// </summary>
+        public void ReparseAll()
+        {
+            List<(DocumentUri uri, string text)> snapshot;
+            lock (_lock)
+            {
+                snapshot = new List<(DocumentUri, string)>(_texts.Count);
+                foreach (var kv in _texts)
+                    snapshot.Add((kv.Key, kv.Value));
+            }
+
+            _logger.LogInformation("ReparseAll: re-parsing {Count} open document(s)", snapshot.Count);
+            foreach (var (uri, text) in snapshot)
+                ParseDocument(uri, text);
+        }
+
         // ----------------------------------------------------------------
         // Parse cache access
         // ----------------------------------------------------------------
@@ -189,11 +214,8 @@ namespace XSharpLanguageServer.Services
         /// <summary>
         /// Runs <see cref="VsParser.Parse"/> on <paramref name="text"/>, stores the
         /// result in the cache, and notifies the diagnostics publisher.
-        /// <para>
-        /// Parsing uses <see cref="XSharpParseOptions.Default"/>, which selects the
-        /// Core dialect with no additional preprocessor symbols. Future work can make
-        /// options configurable via LSP workspace settings.
-        /// </para>
+        /// Parse options (dialect, include paths, preprocessor symbols) are taken
+        /// from <see cref="XSharpConfigurationService.GetParseOptions"/>.
         /// </summary>
         private void ParseDocument(DocumentUri uri, string text)
         {
@@ -201,9 +223,9 @@ namespace XSharpLanguageServer.Services
             {
                 string fileName = uri.GetFileSystemPath() ?? uri.ToString();
 
-                // Default options: Core dialect, ParseLevel.Complete.
-                // TODO: expose dialect and include paths as configurable LSP settings.
-                var options = XSharpParseOptions.Default;
+                // Get parse options from the configuration service.
+                // Defaults to Core dialect / no extra includes if no settings fetched yet.
+                var options = _configService.GetParseOptions();
 
                 var errorListener = new ErrorListener(fileName);
 
