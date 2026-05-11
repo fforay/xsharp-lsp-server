@@ -9,7 +9,8 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace XSharpLanguageServer
+using XSharpLanguageServer.Services;
+namespace XSharpLanguageServer.Handlers
 {
     /// <summary>
     /// Handles LSP semantic token requests (<c>textDocument/semanticTokens/full</c>

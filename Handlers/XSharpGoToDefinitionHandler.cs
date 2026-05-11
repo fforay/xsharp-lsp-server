@@ -7,7 +7,8 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace XSharpLanguageServer
+using XSharpLanguageServer.Services;
+namespace XSharpLanguageServer.Handlers
 {
     /// <summary>
     /// Handles the <c>textDocument/definition</c> LSP request.

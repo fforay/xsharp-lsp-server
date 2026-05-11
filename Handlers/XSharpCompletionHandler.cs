@@ -13,7 +13,9 @@ using System.Collections.Immutable;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace XSharpLanguageServer
+using XSharpLanguageServer.Services;
+using XSharpLanguageServer.Models;
+namespace XSharpLanguageServer.Handlers
 {
     /// <summary>
     /// Handles the <c>textDocument/completion</c> LSP request.

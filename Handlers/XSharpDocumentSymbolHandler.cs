@@ -10,7 +10,8 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace XSharpLanguageServer
+using XSharpLanguageServer.Services;
+namespace XSharpLanguageServer.Handlers
 {
     /// <summary>
     /// Handles the <c>textDocument/documentSymbol</c> LSP request.

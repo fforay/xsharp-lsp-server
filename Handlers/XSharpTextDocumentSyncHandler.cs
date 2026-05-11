@@ -1,4 +1,4 @@
-﻿using MediatR;
+using MediatR;
 using OmniSharp.Extensions.LanguageServer.Protocol;
 using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
 using OmniSharp.Extensions.LanguageServer.Protocol.Document;
@@ -9,7 +9,8 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace XSharpLanguageServer
+using XSharpLanguageServer.Services;
+namespace XSharpLanguageServer.Handlers
 {
     /// <summary>
     /// Handles LSP document synchronisation notifications for XSharp files:
