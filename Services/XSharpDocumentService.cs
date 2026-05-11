@@ -219,6 +219,49 @@ namespace XSharpLanguageServer.Services
             }
         }
 
+        /// <summary>
+        /// Scans the token streams of all currently open documents for
+        /// <c>ID</c> tokens (type 351) whose text matches <paramref name="name"/>
+        /// (case-insensitive) and returns one <see cref="Location"/> per match.
+        /// <para>
+        /// This is the core helper used by both
+        /// <c>textDocument/references</c> and <c>textDocument/rename</c>.
+        /// </para>
+        /// </summary>
+        /// <param name="name">Identifier text to search for.</param>
+        public IReadOnlyList<(DocumentUri Uri, int Line, int Col, int Length)>
+            FindTokenLocations(string name)
+        {
+            // XSharp lexer token type for a plain identifier (non-keyword).
+            const int TokenTypeId = 351;
+
+            var results = new List<(DocumentUri, int, int, int)>();
+
+            List<DocumentUri> uris;
+            lock (_lock) { uris = new List<DocumentUri>(_texts.Keys); }
+
+            foreach (var uri in uris)
+            {
+                if (!TryGetParsed(uri, out var parsed)) continue;
+                if (parsed.TokenStream is not BufferedTokenStream stream) continue;
+
+                var tokens = stream.GetTokens();
+                if (tokens == null) continue;
+
+                foreach (var token in tokens)
+                {
+                    if (token.Type != TokenTypeId) continue;
+                    if (!string.Equals(token.Text, name, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // XSharp lines are 1-based; LSP is 0-based.
+                    int line = Math.Max(0, token.Line - 1);
+                    results.Add((uri, line, token.Column, token.Text.Length));
+                }
+            }
+
+            return results;
+        }
+
         // ----------------------------------------------------------------
         // Parsing
         // ----------------------------------------------------------------
