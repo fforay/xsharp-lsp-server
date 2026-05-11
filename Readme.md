@@ -13,11 +13,11 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Semantic syntax highlighting** — tokens classified into: keyword, type, modifier, macro (preprocessor directives), comment, string, number, operator, variable
 - **Diagnostics** — syntax errors and warnings from the XSharp parser are pushed to the editor as squiggly underlines (`textDocument/publishDiagnostics`)
 - **Document synchronization** — full incremental sync (open / change / save / close) with correct `\r\n` and `\n` line ending handling
+- **Document symbols** — hierarchical outline of all declared entities (namespaces, classes, interfaces, structs, enums, functions, methods, properties, events, fields, …) for the outline panel and `Ctrl+Shift+O` navigation (`textDocument/documentSymbol`)
+- **Folding ranges** — collapse classes, methods, `#region`/`#endregion` blocks, and multi-line comments (`textDocument/foldingRange`)
 
 ### Planned
 
-- Document symbols (outline view, breadcrumb navigation)
-- Folding ranges (collapse classes, methods, `#region` blocks)
 - Hover (keyword descriptions, symbol information)
 - Code completion (keywords, members, document symbols)
 - Signature help (parameter hints in function calls)
@@ -36,6 +36,8 @@ The server is built on [OmniSharp.Extensions.LanguageServer](https://github.com/
 | Diagnostics publisher | `XSharpDiagnosticsPublisher.cs` | Pushes errors/warnings to the client after each parse |
 | Document sync handler | `XSharpTextDocumentSyncHandler.cs` | Handles `didOpen/Change/Save/Close`, triggers re-parse |
 | Semantic tokens handler | `XSharpSemanticTokensHandler.cs` | Reads parse cache, maps tokens to LSP semantic token types |
+| Document symbol handler | `XSharpDocumentSymbolHandler.cs` | Walks parse tree, returns hierarchical `DocumentSymbol[]` for outline and breadcrumbs |
+| Folding range handler | `XSharpFoldingRangeHandler.cs` | Derives fold ranges from parse tree nodes, `#region`/`#endregion` pairs, and multi-line comments |
 
 ### Parse pipeline
 

@@ -92,6 +92,10 @@ namespace XSharpLanguageServer
                     .WithHandler<XSharpTextDocumentSyncHandler>()
                     // Semantic tokens: textDocument/semanticTokens/full and /range
                     .WithHandler<XSharpSemanticTokensHandler>()
+                    // Document symbols: textDocument/documentSymbol (outline, breadcrumbs)
+                    .WithHandler<XSharpDocumentSymbolHandler>()
+                    // Folding ranges: textDocument/foldingRange (collapse blocks, #region, comments)
+                    .WithHandler<XSharpFoldingRangeHandler>()
             );
 
             // ----------------------------------------------------------------
