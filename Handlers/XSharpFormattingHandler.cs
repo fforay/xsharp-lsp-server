@@ -235,11 +235,13 @@ namespace XSharpLanguageServer.Handlers
                     continue;
                 }
 
-                // Find the first non-hidden, non-WS token on this line to decide indent.
+                // Find the first non-hidden, non-WS, non-comment token on this line to decide indent.
                 IToken? firstReal = null;
                 foreach (var t in lineTokens)
                 {
-                    if (t.Channel == 0 && t.Type != -1)
+                    if (t.Channel == 0 && t.Type != -1
+                        && !XSharpLexer.IsComment(t.Type)
+                        && !XSharpLexer.IsString(t.Type))
                     { firstReal = t; break; }
                 }
 
@@ -280,7 +282,10 @@ namespace XSharpLanguageServer.Handlers
 
             foreach (var t in lineTokens)
             {
-                if (t.Channel != 0) continue;   // hidden channel (whitespace/comments on hidden)
+                if (t.Channel != 0) continue;   // hidden channel (whitespace)
+                // Never rewrite string literals or comments — preserve verbatim.
+                if (XSharpLexer.IsString(t.Type))  continue;
+                if (XSharpLexer.IsComment(t.Type)) continue;
                 if (!_keywordMap.TryGetValue(t.Type, out string? canonical)) continue;
                 if (string.Equals(t.Text, canonical, StringComparison.Ordinal)) continue;
 
