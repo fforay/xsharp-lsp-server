@@ -142,20 +142,32 @@ namespace XSharpLanguageServer.Handlers
         /// </summary>
         private static bool IsBlockNode(XSharpParserRuleContext ctx)
         {
-            return ctx is XSharpParser.Namespace_Context
-                       or XSharpParser.Class_Context
-                       or XSharpParser.Interface_Context
-                       or XSharpParser.Structure_Context
-                       or XSharpParser.Enum_Context
-                       or XSharpParser.Delegate_Context
-                       or XSharpParser.VostructContext
-                       or XSharpParser.VounionContext
-                       or XSharpParser.FuncprocContext
-                       or XSharpParser.MethodContext
-                       or XSharpParser.ConstructorContext
-                       or XSharpParser.DestructorContext
-                       or XSharpParser.PropertyContext
-                       or XSharpParser.Event_Context;
+            return ctx is
+                // Type & member declarations
+                XSharpParser.Namespace_Context
+                or XSharpParser.Class_Context
+                or XSharpParser.Interface_Context
+                or XSharpParser.Structure_Context
+                or XSharpParser.Enum_Context
+                or XSharpParser.Delegate_Context
+                or XSharpParser.VostructContext
+                or XSharpParser.VounionContext
+                or XSharpParser.FuncprocContext
+                or XSharpParser.MethodContext
+                or XSharpParser.ConstructorContext
+                or XSharpParser.DestructorContext
+                or XSharpParser.PropertyContext
+                or XSharpParser.Event_Context
+                // Control flow
+                or XSharpParser.IfStmtContext
+                or XSharpParser.ForStmtContext
+                or XSharpParser.ForeachStmtContext
+                or XSharpParser.WhileStmtContext
+                or XSharpParser.RepeatStmtContext
+                or XSharpParser.DoStmtContext
+                or XSharpParser.SwitchStmtContext
+                or XSharpParser.TryStmtContext
+                or XSharpParser.WithBlockContext;
         }
 
         /// <summary>

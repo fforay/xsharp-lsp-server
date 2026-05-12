@@ -69,13 +69,58 @@ namespace XSharpLanguageServer.Handlers
         // ----------------------------------------------------------------
         // Token types used for indent tracking
         // ----------------------------------------------------------------
-        /// <summary>Token types that open a new indented block.</summary>
+
+        /// <summary>
+        /// Member declaration tokens. When encountered they implicitly close the previous
+        /// member body (if any) before opening a new one.
+        /// </summary>
+        private static readonly HashSet<int> _codeBlockHeaders = new()
+        {
+            XSharpLexer.FUNCTION,   XSharpLexer.PROCEDURE,
+            XSharpLexer.METHOD,     XSharpLexer.CONSTRUCTOR, XSharpLexer.DESTRUCTOR,
+            XSharpLexer.PROPERTY,   XSharpLexer.OPERATOR,    XSharpLexer.EVENT,
+            XSharpLexer.ACCESS,     XSharpLexer.ASSIGN,
+        };
+
+        /// <summary>
+        /// Type-opener tokens. Entering one resets <c>inMember</c>; if a member body was
+        /// open it is implicitly closed first.
+        /// </summary>
+        private static readonly HashSet<int> _typeOpeners = new()
+        {
+            XSharpLexer.CLASS, XSharpLexer.INTERFACE, XSharpLexer.STRUCTURE,
+        };
+
+        /// <summary>Single-token type-closer (ENDCLASS). Two-token forms detected by <see cref="IsTypeCloser"/>.</summary>
+        private static readonly HashSet<int> _typeClosers = new()
+        {
+            XSharpLexer.ENDCLASS,
+        };
+
+        /// <summary>Single-token explicit member-end tokens. Two-token forms detected by <see cref="IsEndMember"/>.</summary>
+        private static readonly HashSet<int> _explicitMemberEnds = new()
+        {
+            XSharpLexer.ENDFUNC, XSharpLexer.ENDPROC,
+        };
+
+        /// <summary>
+        /// PROPERTY is single-line (no body block) when the same line also contains one of these.
+        /// </summary>
+        private static readonly HashSet<int> _singleLinePropertyMarkers = new()
+        {
+            XSharpLexer.GET, XSharpLexer.SET, XSharpLexer.AUTO,
+        };
+
+        /// <summary>Sub-block openers inside a PROPERTY body whose END X form is a simple close.</summary>
+        private static readonly HashSet<int> _subBlockOpeners = new()
+        {
+            XSharpLexer.GET, XSharpLexer.SET,
+        };
+
+        /// <summary>Token types that open a new indented block (control flow + type declarations).</summary>
         private static readonly HashSet<int> _indentOpen = new()
         {
             XSharpLexer.CLASS,      XSharpLexer.INTERFACE,  XSharpLexer.STRUCTURE,
-            XSharpLexer.FUNCTION,   XSharpLexer.PROCEDURE,  XSharpLexer.METHOD,
-            XSharpLexer.CONSTRUCTOR,XSharpLexer.DESTRUCTOR, XSharpLexer.PROPERTY,
-            XSharpLexer.OPERATOR,   XSharpLexer.EVENT,
             XSharpLexer.IF,         XSharpLexer.ELSEIF,     XSharpLexer.ELSE,
             XSharpLexer.DO,         XSharpLexer.FOR,        XSharpLexer.FOREACH,
             XSharpLexer.WHILE,      XSharpLexer.REPEAT,
@@ -83,17 +128,15 @@ namespace XSharpLanguageServer.Handlers
             XSharpLexer.TRY,        XSharpLexer.CATCH,      XSharpLexer.FINALLY,
             XSharpLexer.SWITCH,     XSharpLexer.CASE,       XSharpLexer.OTHERWISE,
             XSharpLexer.WITH,
+            XSharpLexer.GET,        XSharpLexer.SET,
         };
 
-        /// <summary>
-        /// Token types that close the current block before this line is written
-        /// (so the line itself is de-dented one level).
-        /// </summary>
+        /// <summary>Token types that close a control-flow block before this line is written.</summary>
         private static readonly HashSet<int> _indentClose = new()
         {
             XSharpLexer.ENDIF,      XSharpLexer.ENDDO,      XSharpLexer.ENDCASE,
-            XSharpLexer.ENDFOR,     XSharpLexer.ENDFUNC,    XSharpLexer.ENDPROC,
-            XSharpLexer.ENDSCAN,    XSharpLexer.ENDTRY,     XSharpLexer.ENDWITH,
+            XSharpLexer.ENDFOR,     XSharpLexer.ENDSCAN,    XSharpLexer.ENDTRY,
+            XSharpLexer.ENDWITH,
             XSharpLexer.ELSE,       XSharpLexer.ELSEIF,
             XSharpLexer.CATCH,      XSharpLexer.FINALLY,
             XSharpLexer.CASE,       XSharpLexer.OTHERWISE,
@@ -214,12 +257,12 @@ namespace XSharpLanguageServer.Handlers
             foreach (var k in byLine.Keys)
                 if (k > maxLine) maxLine = k;
 
-            var sb          = new StringBuilder(originalText.Length);
-            int indentLevel = 0;
-            string nl       = hasCr ? "\r\n" : "\n";
+            var sb              = new StringBuilder(originalText.Length);
+            int indentLevel     = 0;
+            bool inMember       = false;  // a code-block header has been seen
+            bool memberBodyOpen = false;  // indentLevel was incremented for that member
+            string nl           = hasCr ? "\r\n" : "\n";
 
-            // Original lines (0-based index = line number - 1) for content we don't
-            // touch (e.g. string literals, comments that span the whole line).
             var origLines = originalText.Split('\n');
 
             for (int ln = 1; ln <= maxLine; ln++)
@@ -230,12 +273,11 @@ namespace XSharpLanguageServer.Handlers
 
                 if (!byLine.TryGetValue(ln, out var lineTokens) || lineTokens.Count == 0)
                 {
-                    // Blank or whitespace-only line — preserve as empty.
                     sb.Append(nl);
                     continue;
                 }
 
-                // Find the first non-hidden, non-WS, non-comment token on this line to decide indent.
+                // First non-hidden, non-comment, non-string token on this line.
                 IToken? firstReal = null;
                 foreach (var t in lineTokens)
                 {
@@ -245,27 +287,126 @@ namespace XSharpLanguageServer.Handlers
                     { firstReal = t; break; }
                 }
 
-                // Adjust indent level BEFORE writing close tokens.
-                if (firstReal != null && _indentClose.Contains(firstReal.Type))
+                bool isCodeBlockHeader  = firstReal != null && _codeBlockHeaders.Contains(firstReal.Type);
+                bool isTypeOpener       = firstReal != null && _typeOpeners.Contains(firstReal.Type);
+                bool isTypeCloser       = firstReal != null && IsTypeCloser(firstReal, lineTokens);
+                bool isEndMember        = !isTypeCloser && firstReal != null && IsEndMember(firstReal, lineTokens);
+                bool isSubBlockEnd      = !isTypeCloser && !isEndMember
+                                          && firstReal != null && IsSubBlockEnd(firstReal, lineTokens);
+                // Any END token not claimed above: END alone, END SWITCH, END WITH, etc.
+                bool isGenericEnd       = !isTypeCloser && !isEndMember && !isSubBlockEnd
+                                          && firstReal != null && firstReal.Type == XSharpLexer.END;
+                // PROPERTY with inline GET/SET/AUTO — marks a member but opens no body block.
+                bool isSingleLineMember = isCodeBlockHeader
+                    && firstReal!.Type == XSharpLexer.PROPERTY
+                    && LineContainsAny(lineTokens, _singleLinePropertyMarkers);
+
+                // ---- Adjust indent BEFORE writing ----
+                if (isTypeCloser)
+                {
+                    if (inMember && memberBodyOpen) indentLevel = Math.Max(0, indentLevel - 1);
+                    inMember = false; memberBodyOpen = false;
                     indentLevel = Math.Max(0, indentLevel - 1);
+                }
+                else if (isTypeOpener && inMember)
+                {
+                    if (memberBodyOpen) indentLevel = Math.Max(0, indentLevel - 1);
+                    inMember = false; memberBodyOpen = false;
+                }
+                else if (isCodeBlockHeader && inMember && memberBodyOpen)
+                {
+                    indentLevel = Math.Max(0, indentLevel - 1);
+                }
+                else if (isEndMember)
+                {
+                    indentLevel = Math.Max(0, indentLevel - 1);
+                    inMember = false; memberBodyOpen = false;
+                }
+                else if (isSubBlockEnd || isGenericEnd)
+                {
+                    indentLevel = Math.Max(0, indentLevel - 1);
+                }
+                else if (firstReal != null && _indentClose.Contains(firstReal.Type))
+                {
+                    indentLevel = Math.Max(0, indentLevel - 1);
+                }
 
-                // Build the line content: keep original text but uppercase keywords.
-                // Strategy: rebuild from token spans.
+                // ---- Write line ----
                 string lineContent = RebuildLine(origLine, lineTokens);
-
-                // Apply indent.
-                string indent = BuildIndent(indentLevel, indentUnit);
+                string indent      = BuildIndent(indentLevel, indentUnit);
                 sb.Append(indent);
                 sb.Append(lineContent.TrimStart());
 
                 if (ln < maxLine) sb.Append(nl);
 
-                // Adjust indent level AFTER writing open tokens.
-                if (firstReal != null && _indentOpen.Contains(firstReal.Type))
+                // ---- Adjust indent AFTER writing ----
+                if (isCodeBlockHeader)
+                {
+                    inMember = true;
+                    if (!isSingleLineMember) { indentLevel++; memberBodyOpen = true; }
+                    else memberBodyOpen = false;
+                }
+                else if (!isTypeCloser && !isEndMember && !isSubBlockEnd && !isGenericEnd
+                         && firstReal != null && _indentOpen.Contains(firstReal.Type))
+                {
                     indentLevel++;
+                    if (isTypeOpener) { inMember = false; memberBodyOpen = false; }
+                }
             }
 
             return sb.ToString();
+        }
+
+        // ----------------------------------------------------------------
+        // Helpers
+        // ----------------------------------------------------------------
+
+        private static bool IsTypeCloser(IToken firstReal, List<IToken> lineTokens)
+        {
+            if (_typeClosers.Contains(firstReal.Type)) return true;
+            if (firstReal.Type == XSharpLexer.END)
+            {
+                int next = GetNextRealType(firstReal, lineTokens);
+                return next == XSharpLexer.CLASS
+                    || next == XSharpLexer.INTERFACE
+                    || next == XSharpLexer.STRUCTURE;
+            }
+            return false;
+        }
+
+        private static bool IsEndMember(IToken firstReal, List<IToken> lineTokens)
+        {
+            if (_explicitMemberEnds.Contains(firstReal.Type)) return true;
+            if (firstReal.Type == XSharpLexer.END)
+            {
+                int next = GetNextRealType(firstReal, lineTokens);
+                return _codeBlockHeaders.Contains(next);
+            }
+            return false;
+        }
+
+        private static bool IsSubBlockEnd(IToken firstReal, List<IToken> lineTokens)
+        {
+            if (firstReal.Type != XSharpLexer.END) return false;
+            return _subBlockOpeners.Contains(GetNextRealType(firstReal, lineTokens));
+        }
+
+        private static int GetNextRealType(IToken after, List<IToken> lineTokens)
+        {
+            bool found = false;
+            foreach (var t in lineTokens)
+            {
+                if (!found) { if (t == after) found = true; continue; }
+                if (t.Channel == 0 && t.Type != -1) return t.Type;
+            }
+            return -1;
+        }
+
+        private static bool LineContainsAny(List<IToken> lineTokens, HashSet<int> markers)
+        {
+            foreach (var t in lineTokens)
+                if (t.Channel == 0 && markers.Contains(t.Type)) return true;
+            return false;
         }
 
         /// <summary>
