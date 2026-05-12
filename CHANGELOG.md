@@ -6,6 +6,16 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+### Improved
+- **Document formatting** — indentation engine fully rewritten; now correctly handles:
+  - Sequential member declarations (FUNCTION, METHOD, CONSTRUCTOR, DESTRUCTOR, PROPERTY, OPERATOR, EVENT, ACCESS, ASSIGN) implicitly closing the previous member body before opening a new one
+  - CLASS / INTERFACE / STRUCTURE after an open member body: member is closed before the type block opens
+  - Single-line PROPERTY forms (`AUTO`, inline `GET`/`SET`) — marked as members without opening an extra indent level
+  - Multi-line PROPERTY with GET/SET accessor blocks — each accessor indented one extra level; `END GET` / `END SET` close it without ending the property
+  - Bare `END` (used as WHILE / DO WHILE terminator) and two-token `END SWITCH`, `END WITH`, etc. — all handled as generic one-level closers
+  - `ENDCLASS` and `END CLASS` / `END INTERFACE` / `END STRUCTURE` — close the last open member body then the type block (two decrements when needed)
+- **Folding ranges** — control-flow blocks are now foldable: `IF`, `FOR`, `FOREACH`, `WHILE`, `REPEAT`, `DO` / `DO WHILE` / `DO CASE`, `SWITCH`, `TRY`, `WITH`
+
 ### Fixed
 - Duplicate `TYPEOF` entry in the hover keyword dictionary caused a `TypeInitializationException` on the first hover request, making hover completely non-functional
 - Hover now returns the word's LSP `Range` so the client highlights the exact token instead of guessing
