@@ -8,6 +8,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Fixed
 - Duplicate `TYPEOF` entry in the hover keyword dictionary caused a `TypeInitializationException` on the first hover request, making hover completely non-functional
+- Hover now returns the word's LSP `Range` so the client highlights the exact token instead of guessing
+- Hover for members now shows the declaring type (*Declared in `ClassName`*) so overloads from different classes are distinguishable
+- XML doc comments in hover cards are now properly formatted: `<summary>`, `<param>`, `<returns>`, and `<remarks>` sections are rendered as Markdown, and XML entities (`&lt;`, `&gt;`, `&amp;`, …) are decoded; malformed XML falls back to plain tag-stripping
+- Hover now resolves symbols from referenced assemblies (`ReferencedTypes`, `ReferencedGlobals`) in addition to project types and members — BCL and NuGet types are now covered
+- CRLF line endings no longer leave a stray `\r` in the extracted word on Windows files
+- DB-unavailable state is now logged at Debug level for non-keyword hover misses
 
 ## [0.3.0] - 2026-05-11
 

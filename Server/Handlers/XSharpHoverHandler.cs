@@ -6,6 +6,7 @@ using System;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml.Linq;
 
 using XSharpLanguageServer.Services;
 using XSharpLanguageServer.Models;
@@ -218,7 +219,7 @@ namespace XSharpLanguageServer.Handlers
                     return Task.FromResult<Hover?>(null);
                 }
 
-                string word = ExtractWord(text, pos);
+                var (word, wordRange) = ExtractWord(text, pos);
                 _logger.LogInformation("Hover: word='{Word}'", word);
                 if (string.IsNullOrEmpty(word))
                     return Task.FromResult<Hover?>(null);
@@ -228,39 +229,40 @@ namespace XSharpLanguageServer.Handlers
                 // ----------------------------------------------------------
                 if (_keywordDocs.TryGetValue(word, out string? kwDesc))
                 {
-                    var hover = new Hover
+                    return Task.FromResult<Hover?>(new Hover
                     {
                         Contents = new MarkedStringsOrMarkupContent(new MarkupContent
                         {
                             Kind  = MarkupKind.Markdown,
                             Value = $"```xsharp\n{word.ToUpperInvariant()}\n```\n\n{kwDesc}",
                         }),
-                    };
-                    return Task.FromResult<Hover?>(hover);
+                        Range = wordRange,
+                    });
                 }
 
                 // ----------------------------------------------------------
-                // 2. IntelliSense database — user-defined symbols.
+                // 2. IntelliSense database — user-defined and assembly symbols.
                 // ----------------------------------------------------------
                 if (!_dbService.IsAvailable)
+                {
+                    _logger.LogDebug("Hover: DB not available, no result for '{Word}'", word);
                     return Task.FromResult<Hover?>(null);
+                }
 
                 string? filePath = uri.GetFileSystemPath();
                 var symbol = _dbService.FindExact(word, filePath);
                 if (symbol == null)
                     return Task.FromResult<Hover?>(null);
 
-                var md = BuildMarkdown(symbol);
-                var dbHover = new Hover
+                return Task.FromResult<Hover?>(new Hover
                 {
                     Contents = new MarkedStringsOrMarkupContent(new MarkupContent
                     {
                         Kind  = MarkupKind.Markdown,
-                        Value = md,
+                        Value = BuildMarkdown(symbol),
                     }),
-                };
-
-                return Task.FromResult<Hover?>(dbHover);
+                    Range = wordRange,
+                });
             }
             catch (Exception ex)
             {
@@ -274,71 +276,124 @@ namespace XSharpLanguageServer.Handlers
         // ====================================================================
 
         /// <summary>
-        /// Extracts the word (XSharp identifier) under <paramref name="pos"/>
-        /// from <paramref name="text"/>.
+        /// Extracts the identifier under <paramref name="pos"/> and returns both
+        /// the word text and its LSP <see cref="Range"/> so the client can
+        /// highlight the correct span.  Returns an empty word and <c>null</c> range
+        /// when the cursor is not on an identifier character.
         /// </summary>
-        private static string ExtractWord(string text, Position pos)
+        private static (string Word, OmniSharp.Extensions.LanguageServer.Protocol.Models.Range? Range) ExtractWord(string text, Position pos)
         {
             var lines = text.Split('\n');
-            if (pos.Line >= lines.Length) return string.Empty;
+            if (pos.Line >= lines.Length) return (string.Empty, null);
 
-            string line   = lines[pos.Line];
-            int    col    = Math.Min((int)pos.Character, line.Length);
+            // Trim \r so CRLF files don't leave a stray character at line end.
+            string line = lines[pos.Line].TrimEnd('\r');
+            int    col  = Math.Min((int)pos.Character, line.Length);
 
-            // Scan backward to find start of identifier
             int start = col;
             while (start > 0 && IsIdentChar(line[start - 1]))
                 start--;
 
-            // Scan forward to find end of identifier
             int end = col;
             while (end < line.Length && IsIdentChar(line[end]))
                 end++;
 
-            return line.Substring(start, end - start);
+            if (end == start) return (string.Empty, null);
+
+            var range = new OmniSharp.Extensions.LanguageServer.Protocol.Models.Range(
+                new Position(pos.Line, start), new Position(pos.Line, end));
+            return (line.Substring(start, end - start), range);
         }
 
         private static bool IsIdentChar(char c)
             => char.IsLetterOrDigit(c) || c == '_';
 
-        /// <summary>Builds a Markdown hover string from a <see cref="DbSymbol"/>.</summary>
+        /// <summary>Builds a Markdown hover card from a <see cref="DbSymbol"/>.</summary>
         private static string BuildMarkdown(DbSymbol symbol)
         {
             var sb = new StringBuilder();
 
-            // Code block with the prototype
-            if (!string.IsNullOrWhiteSpace(symbol.Sourcecode))
+            // Source prototype in a fenced code block.
+            sb.AppendLine("```xsharp");
+            sb.AppendLine(string.IsNullOrWhiteSpace(symbol.Sourcecode)
+                ? symbol.Name
+                : symbol.Sourcecode.Trim());
+            sb.AppendLine("```");
+
+            // Show the declaring type for methods / members.
+            if (!string.IsNullOrWhiteSpace(symbol.TypeName))
             {
-                sb.AppendLine("```xsharp");
-                sb.AppendLine(symbol.Sourcecode.Trim());
-                sb.AppendLine("```");
-            }
-            else
-            {
-                // Fallback: just the name
-                sb.AppendLine("```xsharp");
-                sb.AppendLine(symbol.Name);
-                sb.AppendLine("```");
+                sb.AppendLine();
+                sb.AppendLine($"*Declared in* `{symbol.TypeName}`");
             }
 
-            // XML doc comment (may contain raw XML — strip tags for readability)
+            // Formatted XML doc comment.
             if (!string.IsNullOrWhiteSpace(symbol.XmlComments))
             {
                 sb.AppendLine();
-                sb.AppendLine(StripXmlTags(symbol.XmlComments.Trim()));
+                sb.AppendLine(FormatXmlDocs(symbol.XmlComments.Trim()));
             }
 
             return sb.ToString();
         }
 
         /// <summary>
-        /// Strips XML tags from a doc-comment string, leaving plain text.
-        /// Handles <c>&lt;summary&gt;</c>, <c>&lt;param&gt;</c>, etc.
+        /// Converts an XML doc-comment string to readable Markdown.
+        /// Handles <c>&lt;summary&gt;</c>, <c>&lt;param&gt;</c>,
+        /// <c>&lt;returns&gt;</c>, and <c>&lt;remarks&gt;</c>; decodes XML
+        /// entities.  Falls back to plain tag-stripping on malformed XML.
         /// </summary>
+        private static string FormatXmlDocs(string xml)
+        {
+            try
+            {
+                // Wrap in a synthetic root so XElement can parse the fragment.
+                var doc = XElement.Parse($"<doc>{xml}</doc>");
+                var sb  = new StringBuilder();
+
+                var summary = doc.Element("summary");
+                if (summary != null)
+                    sb.AppendLine(summary.Value.Trim());
+
+                foreach (var p in doc.Elements("param"))
+                {
+                    if (sb.Length > 0 && !sb.ToString().EndsWith("\n\n"))
+                        sb.AppendLine();
+                    var pname = p.Attribute("name")?.Value ?? "?";
+                    sb.AppendLine($"- **{pname}**: {p.Value.Trim()}");
+                }
+
+                var returns = doc.Element("returns");
+                if (returns != null)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine($"**Returns:** {returns.Value.Trim()}");
+                }
+
+                var remarks = doc.Element("remarks");
+                if (remarks != null)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine($"**Remarks:** {remarks.Value.Trim()}");
+                }
+
+                // Fallback: if none of the known sections matched, use inner text.
+                if (sb.Length == 0)
+                    sb.AppendLine(doc.Value.Trim());
+
+                return sb.ToString().Trim();
+            }
+            catch
+            {
+                // Malformed XML — fall back to simple tag stripping.
+                return StripXmlTags(xml);
+            }
+        }
+
+        /// <summary>Removes all XML tags, leaving plain text. Used as fallback.</summary>
         private static string StripXmlTags(string xml)
         {
-            // Simple regex-free approach: remove angle-bracket content
-            var sb   = new StringBuilder(xml.Length);
+            var sb  = new StringBuilder(xml.Length);
             bool tag = false;
             foreach (char c in xml)
             {

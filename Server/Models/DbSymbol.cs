@@ -33,5 +33,11 @@ namespace XSharpLanguageServer.Models
 
         /// <summary>0-based start column.</summary>
         public int StartCol { get; init; }
+
+        /// <summary>
+        /// Name of the declaring type, or <c>null</c> for top-level types and globals.
+        /// Set only when the query includes a JOIN to the <c>Types</c> table.
+        /// </summary>
+        public string? TypeName { get; init; }
     }
 }
