@@ -344,11 +344,12 @@ namespace XSharpLanguageServer.Services
 
             try
             {
-                // Try types first
+                // 1. Project-level types
                 const string typeSql = @"
                     SELECT t.Name, t.Kind, NULL AS ReturnType,
                            t.Sourcecode, t.XmlComments,
-                           f.FileName, t.StartLine, t.StartColumn
+                           f.FileName, t.StartLine, t.StartColumn,
+                           NULL AS TypeName
                     FROM   ProjectTypes t
                     JOIN   Files f ON f.Id = t.idFile
                     WHERE  t.Name = @name COLLATE NOCASE
@@ -361,13 +362,15 @@ namespace XSharpLanguageServer.Services
                 var typeResult = ReadSingleSymbol(typeCmd);
                 if (typeResult != null) return typeResult;
 
-                // Then members
+                // 2. Project-level members — include declaring type name for the hover card
                 const string memberSql = @"
                     SELECT m.Name, m.Kind, m.ReturnType,
                            m.Sourcecode, m.XmlComments,
-                           f.FileName, m.StartLine, m.StartColumn
+                           f.FileName, m.StartLine, m.StartColumn,
+                           tp.Name AS TypeName
                     FROM   ProjectMembers m
                     JOIN   Files f ON f.Id = m.IdFile
+                    LEFT JOIN Types tp ON tp.Id = m.IdType
                     WHERE  m.Name = @name COLLATE NOCASE
                     ORDER  BY CASE WHEN f.FileName = @file THEN 0 ELSE 1 END
                     LIMIT  1";
@@ -375,7 +378,39 @@ namespace XSharpLanguageServer.Services
                 using var memberCmd = new SqliteCommand(memberSql, conn);
                 memberCmd.Parameters.AddWithValue("@name", name);
                 memberCmd.Parameters.AddWithValue("@file", currentFile ?? string.Empty);
-                return ReadSingleSymbol(memberCmd);
+                var memberResult = ReadSingleSymbol(memberCmd);
+                if (memberResult != null) return memberResult;
+
+                // 3. Assembly-level types (ReferencedTypes from referenced .NET assemblies)
+                const string asmTypeSql = @"
+                    SELECT rt.Name, rt.Kind, NULL AS ReturnType,
+                           NULL AS Sourcecode, NULL AS XmlComments,
+                           a.AssemblyFileName, 0 AS StartLine, 0 AS StartColumn,
+                           NULL AS TypeName
+                    FROM   ReferencedTypes rt
+                    JOIN   Assemblies a ON a.Id = rt.idAssembly
+                    WHERE  rt.Name = @name COLLATE NOCASE
+                    LIMIT  1";
+
+                using var asmTypeCmd = new SqliteCommand(asmTypeSql, conn);
+                asmTypeCmd.Parameters.AddWithValue("@name", name);
+                var asmTypeResult = ReadSingleSymbol(asmTypeCmd);
+                if (asmTypeResult != null) return asmTypeResult;
+
+                // 4. Assembly-level globals (ReferencedGlobals — functions/globals from assemblies)
+                const string asmGlobalSql = @"
+                    SELECT rg.Name, rg.Kind, rg.ReturnType,
+                           rg.Sourcecode, NULL AS XmlComments,
+                           a.AssemblyFileName, 0 AS StartLine, 0 AS StartColumn,
+                           NULL AS TypeName
+                    FROM   ReferencedGlobals rg
+                    JOIN   Assemblies a ON a.Id = rg.idAssembly
+                    WHERE  rg.Name = @name COLLATE NOCASE
+                    LIMIT  1";
+
+                using var asmGlobalCmd = new SqliteCommand(asmGlobalSql, conn);
+                asmGlobalCmd.Parameters.AddWithValue("@name", name);
+                return ReadSingleSymbol(asmGlobalCmd);
             }
             catch (Exception ex)
             {
@@ -541,6 +576,8 @@ namespace XSharpLanguageServer.Services
             // DB lines are 0-based (verified empirically).
             StartLine   = r.IsDBNull(6) ? 0            : r.GetInt32(6),
             StartCol    = r.IsDBNull(7) ? 0            : r.GetInt32(7),
+            // Column 8 (TypeName) is only present in queries that JOIN with Types.
+            TypeName    = r.FieldCount > 8 && !r.IsDBNull(8) ? r.GetString(8) : null,
         };
 
         // ====================================================================

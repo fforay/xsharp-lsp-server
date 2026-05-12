@@ -71,8 +71,10 @@ namespace XSharpLanguageServer.Handlers
         // ----------------------------------------------------------------
 
         /// <summary>
-        /// Member declaration tokens. When encountered they implicitly close the previous
-        /// member body (if any) before opening a new one.
+        /// Code-block header tokens: FUNCTION/PROCEDURE/METHOD/CONSTRUCTOR/DESTRUCTOR/
+        /// PROPERTY/OPERATOR/EVENT/ACCESS/ASSIGN.
+        /// When one of these is encountered it implicitly closes the previous code block
+        /// (if any) before opening a new one.
         /// </summary>
         private static readonly HashSet<int> _codeBlockHeaders = new()
         {
@@ -83,38 +85,31 @@ namespace XSharpLanguageServer.Handlers
         };
 
         /// <summary>
-        /// Type-opener tokens. Entering one resets <c>inMember</c>; if a member body was
-        /// open it is implicitly closed first.
+        /// Type-opener tokens (CLASS/INTERFACE/STRUCTURE).
+        /// Entering one resets the <c>inMember</c> flag — the body of a type
+        /// is not itself a code block.
         /// </summary>
         private static readonly HashSet<int> _typeOpeners = new()
         {
             XSharpLexer.CLASS, XSharpLexer.INTERFACE, XSharpLexer.STRUCTURE,
         };
 
-        /// <summary>Single-token type-closer (ENDCLASS). Two-token forms detected by <see cref="IsTypeCloser"/>.</summary>
+        /// <summary>
+        /// Single-token explicit type-closers (e.g. the <c>ENDCLASS</c> keyword).
+        /// Two-token forms such as <c>END CLASS</c> are detected by <see cref="IsTypeCloser"/>.
+        /// </summary>
         private static readonly HashSet<int> _typeClosers = new()
         {
             XSharpLexer.ENDCLASS,
         };
 
-        /// <summary>Single-token explicit member-end tokens. Two-token forms detected by <see cref="IsEndMember"/>.</summary>
+        /// <summary>
+        /// Single-token explicit member-end tokens (ENDFUNC, ENDPROC).
+        /// Two-token forms such as <c>END METHOD</c> are detected by <see cref="IsEndMember"/>.
+        /// </summary>
         private static readonly HashSet<int> _explicitMemberEnds = new()
         {
             XSharpLexer.ENDFUNC, XSharpLexer.ENDPROC,
-        };
-
-        /// <summary>
-        /// PROPERTY is single-line (no body block) when the same line also contains one of these.
-        /// </summary>
-        private static readonly HashSet<int> _singleLinePropertyMarkers = new()
-        {
-            XSharpLexer.GET, XSharpLexer.SET, XSharpLexer.AUTO,
-        };
-
-        /// <summary>Sub-block openers inside a PROPERTY body whose END X form is a simple close.</summary>
-        private static readonly HashSet<int> _subBlockOpeners = new()
-        {
-            XSharpLexer.GET, XSharpLexer.SET,
         };
 
         /// <summary>Token types that open a new indented block (control flow + type declarations).</summary>
@@ -128,10 +123,33 @@ namespace XSharpLanguageServer.Handlers
             XSharpLexer.TRY,        XSharpLexer.CATCH,      XSharpLexer.FINALLY,
             XSharpLexer.SWITCH,     XSharpLexer.CASE,       XSharpLexer.OTHERWISE,
             XSharpLexer.WITH,
+            // PROPERTY sub-block accessors
             XSharpLexer.GET,        XSharpLexer.SET,
         };
 
-        /// <summary>Token types that close a control-flow block before this line is written.</summary>
+        /// <summary>
+        /// PROPERTY is a single-line (non-block) declaration when the same line also carries
+        /// one of these tokens: an inline getter/setter or the AUTO keyword.
+        /// </summary>
+        private static readonly HashSet<int> _singleLinePropertyMarkers = new()
+        {
+            XSharpLexer.GET, XSharpLexer.SET, XSharpLexer.AUTO,
+        };
+
+        /// <summary>
+        /// Sub-block openers whose two-token <c>END X</c> form requires a simple close (−1)
+        /// without touching <c>inMember</c>.  Detected by <see cref="IsSubBlockEnd"/>.
+        /// </summary>
+        private static readonly HashSet<int> _subBlockOpeners = new()
+        {
+            XSharpLexer.GET, XSharpLexer.SET,
+        };
+
+        /// <summary>
+        /// Token types that close the current control-flow block before this line is written.
+        /// Code-block headers (METHOD, FUNCTION, …) and type-closers (ENDCLASS, END CLASS, …)
+        /// are handled separately.
+        /// </summary>
         private static readonly HashSet<int> _indentClose = new()
         {
             XSharpLexer.ENDIF,      XSharpLexer.ENDDO,      XSharpLexer.ENDCASE,
@@ -257,11 +275,11 @@ namespace XSharpLanguageServer.Handlers
             foreach (var k in byLine.Keys)
                 if (k > maxLine) maxLine = k;
 
-            var sb              = new StringBuilder(originalText.Length);
-            int indentLevel     = 0;
-            bool inMember       = false;  // a code-block header has been seen
-            bool memberBodyOpen = false;  // indentLevel was incremented for that member
-            string nl           = hasCr ? "\r\n" : "\n";
+            var sb             = new StringBuilder(originalText.Length);
+            int indentLevel    = 0;
+            bool inMember      = false;  // true once a code-block header has been seen
+            bool memberBodyOpen = false; // true only when indentLevel was incremented for that member
+            string nl          = hasCr ? "\r\n" : "\n";
 
             var origLines = originalText.Split('\n');
 
@@ -293,10 +311,11 @@ namespace XSharpLanguageServer.Handlers
                 bool isEndMember        = !isTypeCloser && firstReal != null && IsEndMember(firstReal, lineTokens);
                 bool isSubBlockEnd      = !isTypeCloser && !isEndMember
                                           && firstReal != null && IsSubBlockEnd(firstReal, lineTokens);
-                // Any END token not claimed above: END alone, END SWITCH, END WITH, etc.
+                // Any remaining END + X: generic one-level close (e.g. END SWITCH).
                 bool isGenericEnd       = !isTypeCloser && !isEndMember && !isSubBlockEnd
-                                          && firstReal != null && firstReal.Type == XSharpLexer.END;
-                // PROPERTY with inline GET/SET/AUTO — marks a member but opens no body block.
+                                          && firstReal != null && firstReal.Type == XSharpLexer.END
+                                          && GetNextRealType(firstReal, lineTokens) != -1;
+                // PROPERTY on one line with GET/SET/AUTO — member marker but no body block.
                 bool isSingleLineMember = isCodeBlockHeader
                     && firstReal!.Type == XSharpLexer.PROPERTY
                     && LineContainsAny(lineTokens, _singleLinePropertyMarkers);
@@ -304,17 +323,20 @@ namespace XSharpLanguageServer.Handlers
                 // ---- Adjust indent BEFORE writing ----
                 if (isTypeCloser)
                 {
+                    // Close the open member body (if any), then close the type.
                     if (inMember && memberBodyOpen) indentLevel = Math.Max(0, indentLevel - 1);
                     inMember = false; memberBodyOpen = false;
                     indentLevel = Math.Max(0, indentLevel - 1);
                 }
                 else if (isTypeOpener && inMember)
                 {
+                    // CLASS/INTERFACE/STRUCTURE after an open member: implicitly close member body.
                     if (memberBodyOpen) indentLevel = Math.Max(0, indentLevel - 1);
                     inMember = false; memberBodyOpen = false;
                 }
                 else if (isCodeBlockHeader && inMember && memberBodyOpen)
                 {
+                    // Implicit close of previous code block body.
                     indentLevel = Math.Max(0, indentLevel - 1);
                 }
                 else if (isEndMember)
@@ -358,9 +380,14 @@ namespace XSharpLanguageServer.Handlers
         }
 
         // ----------------------------------------------------------------
-        // Helpers
+        // Helpers for type-close / member-end detection
         // ----------------------------------------------------------------
 
+        /// <summary>
+        /// Returns true when <paramref name="firstReal"/> signals the end of a type block
+        /// (CLASS/INTERFACE/STRUCTURE): either a single <c>ENDCLASS</c> token or a two-token
+        /// <c>END CLASS</c> / <c>END INTERFACE</c> / <c>END STRUCTURE</c> sequence.
+        /// </summary>
         private static bool IsTypeCloser(IToken firstReal, List<IToken> lineTokens)
         {
             if (_typeClosers.Contains(firstReal.Type)) return true;
@@ -374,6 +401,11 @@ namespace XSharpLanguageServer.Handlers
             return false;
         }
 
+        /// <summary>
+        /// Returns true when <paramref name="firstReal"/> explicitly closes a code block
+        /// member: either a single <c>ENDFUNC</c>/<c>ENDPROC</c> token or a two-token
+        /// <c>END METHOD</c> / <c>END FUNCTION</c> / … sequence.
+        /// </summary>
         private static bool IsEndMember(IToken firstReal, List<IToken> lineTokens)
         {
             if (_explicitMemberEnds.Contains(firstReal.Type)) return true;
@@ -385,12 +417,10 @@ namespace XSharpLanguageServer.Handlers
             return false;
         }
 
-        private static bool IsSubBlockEnd(IToken firstReal, List<IToken> lineTokens)
-        {
-            if (firstReal.Type != XSharpLexer.END) return false;
-            return _subBlockOpeners.Contains(GetNextRealType(firstReal, lineTokens));
-        }
-
+        /// <summary>
+        /// Returns the token type of the first real (channel 0, non-EOF) token on the line
+        /// that comes after <paramref name="after"/>, or -1 if none.
+        /// </summary>
         private static int GetNextRealType(IToken after, List<IToken> lineTokens)
         {
             bool found = false;
@@ -402,6 +432,20 @@ namespace XSharpLanguageServer.Handlers
             return -1;
         }
 
+        /// <summary>
+        /// Returns true for <c>END GET</c> / <c>END SET</c> — a two-token form that closes
+        /// a PROPERTY accessor sub-block without ending the enclosing member.
+        /// </summary>
+        private static bool IsSubBlockEnd(IToken firstReal, List<IToken> lineTokens)
+        {
+            if (firstReal.Type != XSharpLexer.END) return false;
+            return _subBlockOpeners.Contains(GetNextRealType(firstReal, lineTokens));
+        }
+
+        /// <summary>
+        /// Returns true when any token on <paramref name="lineTokens"/> (channel 0) has a
+        /// type that is in <paramref name="markers"/>.
+        /// </summary>
         private static bool LineContainsAny(List<IToken> lineTokens, HashSet<int> markers)
         {
             foreach (var t in lineTokens)

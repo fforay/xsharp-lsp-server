@@ -14,7 +14,7 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Diagnostics** — syntax errors and warnings from the XSharp parser are pushed to the editor as squiggly underlines (`textDocument/publishDiagnostics`)
 - **Document synchronization** — full incremental sync (open / change / save / close) with correct `\r\n` and `\n` line ending handling (`textDocument/didOpen`, `didChange`, `didSave`, `didClose`)
 - **Document symbols** — hierarchical outline of all declared entities (namespaces, classes, interfaces, structs, enums, functions, methods, properties, events, fields, …) for the outline panel and `Ctrl+Shift+O` navigation (`textDocument/documentSymbol`)
-- **Folding ranges** — collapse classes, methods, `#region`/`#endregion` blocks, and multi-line comments (`textDocument/foldingRange`)
+- **Folding ranges** — collapse type declarations, member declarations, control-flow blocks (`IF`, `FOR`, `FOREACH`, `WHILE`, `REPEAT`, `DO`/`DO WHILE`/`DO CASE`, `SWITCH`, `TRY`, `WITH`), `#region`/`#endregion` pairs, and multi-line comments (`textDocument/foldingRange`)
 - **Completion** — keywords (from lexer vocabulary) + document symbols from the current file + cross-file type/member lookup from the IntelliSense database, filtered by typed prefix; member completion after `.` and `:` (`textDocument/completion`)
 - **Hover** — prototype and XML doc comments for the symbol under the cursor, sourced from the IntelliSense database (`textDocument/hover`)
 - **Go to definition** — jumps to the file and line where a symbol is declared, sourced from the IntelliSense database (`textDocument/definition`)
@@ -22,16 +22,17 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Configurable dialect and include paths** — dialect (Core, VO, Vulcan, Harbour, …), include paths, and preprocessor symbols read from `workspace/didChangeConfiguration`; changes trigger a full reparse (`workspace/didChangeConfiguration`)
 - **Find references** — locates all usages of the identifier under the cursor across all currently open documents; declaration sites also returned from the IntelliSense database when requested (`textDocument/references`)
 - **Rename symbol** — renames every occurrence of the identifier under the cursor across all currently open documents; returns a `WorkspaceEdit` for atomic client-side apply (`textDocument/rename`)
-- **Document formatting** — uppercases all XSharp keywords to their canonical spelling and normalises indentation using client-supplied tab size / insert-spaces options; keyword map is built automatically from `XSharpLexer` reflection (221 entries) (`textDocument/formatting`)
+- **Document formatting** — uppercases all XSharp keywords to their canonical spelling and normalises indentation; handles sequential member declarations, single-line and multi-line PROPERTY forms, GET/SET accessor blocks, and all `END` / `END X` terminator variants; uses client-supplied tab size / insert-spaces options; keyword map built automatically from `XSharpLexer` reflection (`textDocument/formatting`)
 - **Auto-reconnect to IntelliSense database** — a `FileSystemWatcher` monitors the `.vs/` subtree for `X#Model.xsdb` Created/Changed events and reconnects automatically when VS flushes a new copy of the database (typically every ~5 minutes) or when the file first appears after server startup
 
 ### Planned
 
-- Completion deduplication across keywords, in-file symbols, and DB results
-- Hover tooltips for built-in keywords
-- `workspace/symbol` — project-wide symbol search
-- Code lens — reference counts above declarations
-- Inlay hints — inline type annotations
+- Workspace-wide file index — references, rename, code lens, and inlay hints currently only cover open documents; a background scanner will extend coverage to all project files
+- `textDocument/selectionRange` — smart expand/shrink selection (Alt+Shift+→)
+- `textDocument/onTypeFormatting` — auto-indent on structural keywords
+- Call hierarchy (`prepareCallHierarchy`, incoming/outgoing calls)
+- Code actions — fix keyword casing, add USING namespace
+- Semantic diagnostics — type errors, wrong argument counts, unknown identifiers
 
 ---
 
