@@ -6,9 +6,18 @@
     <RootNamespace>xsharp_lsp_server</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Self-contained single-file publish -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Keep PDBs out of the bundle; trim unused framework code -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
   </PropertyGroup>
   
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
     <PackageReference Include="OmniSharp.Extensions.LanguageServer" Version="0.19.9" />
     <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1" />
@@ -20,6 +29,9 @@
 <ItemGroup>
   <Reference Include="XSharp.VSParser">
     <HintPath>C:\Program Files (x86)\XSharp\Extension\Project\XSharp.VSParser.dll</HintPath>
+    <!-- Must travel alongside the exe — cannot be bundled inside single-file -->
+    <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
   </Reference>
 </ItemGroup>
   
