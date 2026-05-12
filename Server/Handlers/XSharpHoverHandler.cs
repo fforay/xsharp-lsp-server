@@ -174,7 +174,6 @@ namespace XSharpLanguageServer.Handlers
             { "UNCHECKED",   "Disables overflow checking for arithmetic operations in the block." },
             { "FIXED",       "Pins a managed object in memory for unmanaged pointer access." },
             { "SIZEOF",      "Returns the size in bytes of a value type at compile time." },
-            { "TYPEOF",      "Returns the System.Type descriptor for a type." },
             { "NAMEOF",      "Returns the name of a variable, type, or member as a string." },
             { "VOLATILE",    "Marks a field as volatile (reads/writes not cached by the CPU)." },
         };
@@ -210,11 +209,17 @@ namespace XSharpLanguageServer.Handlers
                 var uri  = request.TextDocument.Uri;
                 var pos  = request.Position;
 
+                _logger.LogInformation("Hover: uri={Uri} line={Line} col={Col}", uri, pos.Line, pos.Character);
+
                 var text = _documentService.TryGetText(uri, out var txt) ? txt : null;
                 if (text == null)
+                {
+                    _logger.LogWarning("Hover: no cached text for {Uri}", uri);
                     return Task.FromResult<Hover?>(null);
+                }
 
                 string word = ExtractWord(text, pos);
+                _logger.LogInformation("Hover: word='{Word}'", word);
                 if (string.IsNullOrEmpty(word))
                     return Task.FromResult<Hover?>(null);
 
