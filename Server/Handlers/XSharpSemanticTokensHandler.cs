@@ -115,12 +115,25 @@ namespace XSharpLanguageServer.Handlers
                     "Tokenising {Uri}: {Count} tokens",
                     identifier.TextDocument.Uri, tokens.Count);
 
-                foreach (XSharpToken token in tokens)
+                for (int i = 0; i < tokens.Count; i++)
                 {
                     // Respect client-side cancellation (e.g. user closes the file).
                     cancellationToken.ThrowIfCancellationRequested();
 
+                    var token = (XSharpToken)tokens[i];
                     string? tokenType = ClassifyToken(token);
+
+                    // FoxPro star-comment: the lexer emits a MULT token for the leading '*'
+                    // followed by a SL_COMMENT token for the rest of the line.
+                    // Reclassify the MULT so the whole line is highlighted as a comment.
+                    if (token.Type == XSharpLexer.MULT
+                        && i + 1 < tokens.Count
+                        && tokens[i + 1].Type == XSharpLexer.SL_COMMENT
+                        && tokens[i + 1].Line == token.Line)
+                    {
+                        tokenType = SemanticTokenType.Comment;
+                    }
+
                     if (tokenType == null) continue;
 
                     // XSharp token lines are 1-based; LSP positions are 0-based.
