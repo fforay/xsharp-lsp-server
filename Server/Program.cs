@@ -94,6 +94,11 @@ namespace XSharpLanguageServer
                         // the workspace root is known from the LSP initialize request.
                         services.AddSingleton<XSharpDatabaseService>();
 
+                        // Workspace index: in-process symbol index built from source files.
+                        // Populated at startup by XSharpInitializedHandler (Step 3) and
+                        // kept current on didSave.  Tier-1 of the two-tier symbol lookup.
+                        services.AddSingleton<XSharpWorkspaceIndex>();
+
                         // Diagnostics publisher: sends textDocument/publishDiagnostics
                         // notifications after each parse. Registered as a singleton and
                         // wired into XSharpDocumentService below (after server build),
