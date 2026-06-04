@@ -139,6 +139,12 @@ namespace XSharpLanguageServer.Handlers
                 {
                     var symbols = IndexSymbolExtractor.Extract(parsed.Tree, path, parsed.Text);
                     _workspaceIndex.UpdateFile(path, symbols);
+
+                    if (parsed.TokenStream != null)
+                    {
+                        var tokens = IndexSymbolExtractor.ExtractIdentifiers(parsed.TokenStream, path);
+                        _workspaceIndex.UpdateFileTokens(path, tokens);
+                    }
                 }
             }
 

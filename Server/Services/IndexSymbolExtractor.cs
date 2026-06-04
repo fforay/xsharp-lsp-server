@@ -4,6 +4,7 @@ using LanguageService.SyntaxTree.Tree;
 using System;
 using System.Collections.Generic;
 using XSharpLanguageServer.Models;
+using BufferedTokenStream = LanguageService.SyntaxTree.BufferedTokenStream;
 
 namespace XSharpLanguageServer.Services
 {
@@ -44,6 +45,52 @@ namespace XSharpLanguageServer.Services
                 : Array.Empty<string>();
 
             Walk(tree, filePath, lines, currentTypeName: null, results);
+            return results;
+        }
+
+        // ====================================================================
+        // Identifier token extraction  (for the usage/reference index)
+        // ====================================================================
+
+        // XSharp lexer token type for a plain identifier (non-keyword).
+        private const int TokenTypeId = 351;
+
+        /// <summary>
+        /// Extracts every identifier token from <paramref name="tokenStream"/> and
+        /// returns them as a flat list of <see cref="IdentifierLocation"/> values.
+        /// <para>
+        /// Used by <c>XSharpWorkspaceScanner</c>, <c>XSharpTextDocumentSyncHandler</c>,
+        /// and <c>XSharpDidChangeWatchedFilesHandler</c> to populate the token usage
+        /// index in <see cref="XSharpWorkspaceIndex"/> so that
+        /// <c>textDocument/references</c> can search across all project files.
+        /// </para>
+        /// </summary>
+        public static List<IdentifierLocation> ExtractIdentifiers(
+            ITokenStream tokenStream,
+            string filePath)
+        {
+            var results = new List<IdentifierLocation>();
+
+            if (tokenStream is not BufferedTokenStream buffered) return results;
+
+            var tokens = buffered.GetTokens();
+            if (tokens == null) return results;
+
+            foreach (var token in tokens)
+            {
+                if (token.Type != TokenTypeId) continue;
+                if (string.IsNullOrEmpty(token.Text)) continue;
+
+                // XSharp parser uses 1-based lines; LSP uses 0-based.
+                results.Add(new IdentifierLocation
+                {
+                    Text     = token.Text,
+                    FilePath = filePath,
+                    Line     = Math.Max(0, token.Line - 1),
+                    Col      = Math.Max(0, token.Column),
+                });
+            }
+
             return results;
         }
 

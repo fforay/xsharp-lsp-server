@@ -44,6 +44,16 @@ namespace XSharpLanguageServer.Services
         private readonly Dictionary<string, List<WorkspaceSymbol>> _byFile
             = new(StringComparer.OrdinalIgnoreCase);
 
+        // ── Token (usage) index ──────────────────────────────────────────────
+        // Inverted: UPPER-CASE identifier text → all locations across all files.
+        private readonly Dictionary<string, List<IdentifierLocation>> _tokensByName
+            = new(StringComparer.Ordinal);
+
+        // Per-file: normalised path → every identifier token in that file.
+        // Used to remove stale entries on update/delete.
+        private readonly Dictionary<string, List<IdentifierLocation>> _tokensByFile
+            = new(StringComparer.OrdinalIgnoreCase);
+
         private readonly ReaderWriterLockSlim _rwLock
             = new(LockRecursionPolicy.NoRecursion);
 
@@ -86,8 +96,8 @@ namespace XSharpLanguageServer.Services
         }
 
         /// <summary>
-        /// Removes all indexed symbols that originated from <paramref name="filePath"/>.
-        /// Called when a file is deleted or renamed.
+        /// Removes all indexed symbols and identifier tokens that originated from
+        /// <paramref name="filePath"/>. Called when a file is deleted or renamed.
         /// </summary>
         public void RemoveFile(string filePath)
         {
@@ -97,11 +107,71 @@ namespace XSharpLanguageServer.Services
             try
             {
                 RemoveFileCore(normalized);
+                RemoveTokensCore(normalized);
             }
             finally
             {
                 _rwLock.ExitWriteLock();
             }
+        }
+
+        /// <summary>
+        /// Replaces all indexed identifier tokens for <paramref name="filePath"/>
+        /// with the provided <paramref name="tokens"/> list.
+        /// <para>
+        /// Called by <c>XSharpWorkspaceScanner</c>, <c>XSharpTextDocumentSyncHandler</c>
+        /// on <c>didSave</c>, and <c>XSharpDidChangeWatchedFilesHandler</c> after each
+        /// file parse so that <see cref="FindTokenLocations"/> covers all project files.
+        /// </para>
+        /// </summary>
+        public void UpdateFileTokens(string filePath, IEnumerable<IdentifierLocation> tokens)
+        {
+            var normalized = NormalizePath(filePath);
+            var list = tokens.ToList();
+
+            _rwLock.EnterWriteLock();
+            try
+            {
+                RemoveTokensCore(normalized);
+                AddTokensCore(normalized, list);
+            }
+            finally
+            {
+                _rwLock.ExitWriteLock();
+            }
+        }
+
+        // ====================================================================
+        // Token queries
+        // ====================================================================
+
+        /// <summary>
+        /// Returns every location in the project where <paramref name="name"/> appears
+        /// as an identifier token, across all indexed files.
+        /// <para>
+        /// Used by <c>XSharpReferencesHandler</c> to find usages in closed files.
+        /// Open-document results (which may contain unsaved edits) should be merged
+        /// by the caller, with open-file results taking precedence.
+        /// </para>
+        /// </summary>
+        public IReadOnlyList<IdentifierLocation> FindTokenLocations(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return Array.Empty<IdentifierLocation>();
+
+            var upper = name.ToUpperInvariant();
+
+            _rwLock.EnterReadLock();
+            try
+            {
+                if (_tokensByName.TryGetValue(upper, out var locations))
+                    return locations.ToList();
+            }
+            finally
+            {
+                _rwLock.ExitReadLock();
+            }
+
+            return Array.Empty<IdentifierLocation>();
         }
 
         // ====================================================================
@@ -260,6 +330,17 @@ namespace XSharpLanguageServer.Services
             }
         }
 
+        /// <summary>Returns the total number of identifier token locations indexed.</summary>
+        public int IndexedTokenCount
+        {
+            get
+            {
+                _rwLock.EnterReadLock();
+                try { return _tokensByName.Values.Sum(b => b.Count); }
+                finally { _rwLock.ExitReadLock(); }
+            }
+        }
+
         // ====================================================================
         // Private helpers  (must be called with write lock held)
         // ====================================================================
@@ -317,6 +398,41 @@ namespace XSharpLanguageServer.Services
                     }
                     typeBucket.Add(sym);
                 }
+            }
+        }
+
+        private void RemoveTokensCore(string normalizedPath)
+        {
+            if (!_tokensByFile.TryGetValue(normalizedPath, out var oldTokens)) return;
+
+            foreach (var tok in oldTokens)
+            {
+                var key = tok.Text.ToUpperInvariant();
+                if (_tokensByName.TryGetValue(key, out var bucket))
+                {
+                    bucket.RemoveAll(t => NormalizePath(t.FilePath)
+                        .Equals(normalizedPath, StringComparison.OrdinalIgnoreCase));
+                    if (bucket.Count == 0)
+                        _tokensByName.Remove(key);
+                }
+            }
+
+            _tokensByFile.Remove(normalizedPath);
+        }
+
+        private void AddTokensCore(string normalizedPath, List<IdentifierLocation> tokens)
+        {
+            _tokensByFile[normalizedPath] = tokens;
+
+            foreach (var tok in tokens)
+            {
+                var key = tok.Text.ToUpperInvariant();
+                if (!_tokensByName.TryGetValue(key, out var bucket))
+                {
+                    bucket = new List<IdentifierLocation>();
+                    _tokensByName[key] = bucket;
+                }
+                bucket.Add(tok);
             }
         }
 

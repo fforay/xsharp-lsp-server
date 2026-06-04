@@ -81,8 +81,8 @@ namespace XSharpLanguageServer.Services
             await Task.WhenAll(tasks).ConfigureAwait(false);
 
             _logger.LogInformation(
-                "WorkspaceScanner: complete — {Files} file(s), {Symbols} symbol(s) indexed",
-                _index.IndexedFileCount, _index.IndexedSymbolCount);
+                "WorkspaceScanner: complete — {Files} file(s), {Symbols} symbol(s), {Tokens} token location(s) indexed",
+                _index.IndexedFileCount, _index.IndexedSymbolCount, _index.IndexedTokenCount);
         }
 
         private void IndexFile(string filePath, LanguageService.CodeAnalysis.XSharp.XSharpParseOptions options)
@@ -97,7 +97,7 @@ namespace XSharpLanguageServer.Services
                     filePath,
                     options,
                     errorListener,
-                    out _,
+                    out var tokenStream,
                     out var tree,
                     out _);
 
@@ -105,6 +105,12 @@ namespace XSharpLanguageServer.Services
 
                 var symbols = IndexSymbolExtractor.Extract(tree, filePath, text);
                 _index.UpdateFile(filePath, symbols);
+
+                if (tokenStream != null)
+                {
+                    var tokens = IndexSymbolExtractor.ExtractIdentifiers(tokenStream, filePath);
+                    _index.UpdateFileTokens(filePath, tokens);
+                }
             }
             catch (Exception ex)
             {

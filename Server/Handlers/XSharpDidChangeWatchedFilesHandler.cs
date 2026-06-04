@@ -127,7 +127,7 @@ namespace XSharpLanguageServer.Handlers
                     filePath,
                     options,
                     errorListener,
-                    out _,
+                    out var tokenStream,
                     out var tree,
                     out _);
 
@@ -135,6 +135,12 @@ namespace XSharpLanguageServer.Handlers
 
                 var symbols = IndexSymbolExtractor.Extract(tree, filePath, text);
                 _workspaceIndex.UpdateFile(filePath, symbols);
+
+                if (tokenStream != null)
+                {
+                    var tokens = IndexSymbolExtractor.ExtractIdentifiers(tokenStream, filePath);
+                    _workspaceIndex.UpdateFileTokens(filePath, tokens);
+                }
 
                 _logger.LogDebug("WorkspaceIndex: re-indexed {File} ({Count} symbol(s))",
                     Path.GetFileName(filePath), symbols.Count);

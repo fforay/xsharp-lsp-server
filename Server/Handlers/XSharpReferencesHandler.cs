@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using XSharpLanguageServer.Services;
+using XSharpLanguageServer.Models;
 
 namespace XSharpLanguageServer.Handlers
 {
@@ -73,17 +74,46 @@ namespace XSharpLanguageServer.Handlers
 
                 var locations = new List<Location>();
 
-                // Token-scan all open documents.
+                // ── Closed files: workspace index token map ───────────────────
+                // Covers all project files indexed at startup or on save.
+                // Results are keyed by (normalised path, line) so open-file
+                // results can override them below.
+                var indexedByKey = new Dictionary<(string FilePath, int Line), Location>(
+                    FileLineComparer.Instance);
+
+                foreach (var tok in _workspaceIndex.FindTokenLocations(word))
+                {
+                    int len = tok.Text.Length;
+                    var loc = new Location
+                    {
+                        Uri   = DocumentUri.FromFileSystemPath(tok.FilePath),
+                        Range = new OmniSharp.Extensions.LanguageServer.Protocol.Models.Range(
+                            new Position(tok.Line, tok.Col),
+                            new Position(tok.Line, tok.Col + len)),
+                    };
+                    indexedByKey[(tok.FilePath, tok.Line)] = loc;
+                }
+
+                // ── Open files: live token scan (may contain unsaved edits) ──
+                // Replace any indexed entry for the same file+line so unsaved
+                // changes are reflected accurately.
+                var openFilePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
                 foreach (var (uri, line, col, len) in _documentService.FindTokenLocations(word))
                 {
-                    locations.Add(new Location
+                    string? fp = uri.GetFileSystemPath();
+                    if (fp != null) openFilePaths.Add(fp);
+
+                    indexedByKey[(fp ?? uri.ToString(), line)] = new Location
                     {
                         Uri   = uri,
                         Range = new OmniSharp.Extensions.LanguageServer.Protocol.Models.Range(
                             new Position(line, col),
                             new Position(line, col + len)),
-                    });
+                    };
                 }
+
+                locations.AddRange(indexedByKey.Values);
 
                 // Workspace index declaration sites when client requests them.
                 // (Assembly symbols have no meaningful source locations — index only.)
@@ -135,5 +165,19 @@ namespace XSharpLanguageServer.Handlers
         }
 
         private static bool IsIdentChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+        private sealed class FileLineComparer : IEqualityComparer<(string FilePath, int Line)>
+        {
+            public static readonly FileLineComparer Instance = new();
+
+            public bool Equals((string FilePath, int Line) x, (string FilePath, int Line) y)
+                => x.Line == y.Line
+                && string.Equals(x.FilePath, y.FilePath, StringComparison.OrdinalIgnoreCase);
+
+            public int GetHashCode((string FilePath, int Line) obj)
+                => HashCode.Combine(
+                    StringComparer.OrdinalIgnoreCase.GetHashCode(obj.FilePath),
+                    obj.Line);
+        }
     }
 }
