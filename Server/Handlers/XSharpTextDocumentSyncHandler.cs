@@ -8,7 +8,6 @@ using OmniSharp.Extensions.LanguageServer.Protocol.Server.Capabilities;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-
 using XSharpLanguageServer.Services;
 namespace XSharpLanguageServer.Handlers
 {
@@ -26,6 +25,7 @@ namespace XSharpLanguageServer.Handlers
     public class XSharpTextDocumentSyncHandler : TextDocumentSyncHandlerBase
     {
         private readonly XSharpDocumentService _documentService;
+        private readonly XSharpWorkspaceIndex _workspaceIndex;
 
         /// <summary>
         /// The server facade used to send notifications back to the client
@@ -36,10 +36,12 @@ namespace XSharpLanguageServer.Handlers
         /// <summary>Initialises the handler. Called by the DI container.</summary>
         public XSharpTextDocumentSyncHandler(
             XSharpDocumentService documentService,
+            XSharpWorkspaceIndex workspaceIndex,
             ILanguageServerFacade server)
         {
             _documentService = documentService;
-            _server = server;
+            _workspaceIndex  = workspaceIndex;
+            _server          = server;
         }
 
         /// <summary>
@@ -126,7 +128,18 @@ namespace XSharpLanguageServer.Handlers
         {
             if (request.Text != null)
             {
-                _documentService.UpdateText(request.TextDocument.Uri, request.Text);
+                var uri = request.TextDocument.Uri;
+
+                // UpdateText is synchronous — the parse is complete when it returns.
+                _documentService.UpdateText(uri, request.Text);
+
+                // Re-index this file with the freshly parsed tree.
+                var path = uri.GetFileSystemPath();
+                if (path != null && _documentService.TryGetParsed(uri, out var parsed) && parsed.Tree != null)
+                {
+                    var symbols = IndexSymbolExtractor.Extract(parsed.Tree, path, parsed.Text);
+                    _workspaceIndex.UpdateFile(path, symbols);
+                }
             }
 
             _server.SendNotification("workspace/semanticTokens/refresh");

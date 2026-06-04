@@ -95,9 +95,10 @@ namespace XSharpLanguageServer
                         services.AddSingleton<XSharpDatabaseService>();
 
                         // Workspace index: in-process symbol index built from source files.
-                        // Populated at startup by XSharpInitializedHandler (Step 3) and
+                        // Populated at startup by XSharpWorkspaceScanner (Step 3) and
                         // kept current on didSave.  Tier-1 of the two-tier symbol lookup.
                         services.AddSingleton<XSharpWorkspaceIndex>();
+                        services.AddSingleton<XSharpWorkspaceScanner>();
 
                         // Diagnostics publisher: sends textDocument/publishDiagnostics
                         // notifications after each parse. Registered as a singleton and
@@ -139,11 +140,19 @@ namespace XSharpLanguageServer
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
                     {
-                        var db = server.Services.GetRequiredService<XSharpDatabaseService>();
                         string? root = request.RootUri?.GetFileSystemPath()
                                     ?? request.RootPath;
+
+                        var db = server.Services.GetRequiredService<XSharpDatabaseService>();
                         if (!string.IsNullOrEmpty(root))
                             db.TryConnect(root);
+
+                        if (!string.IsNullOrEmpty(root))
+                        {
+                            var scanner = server.Services.GetRequiredService<XSharpWorkspaceScanner>();
+                            scanner.StartScan(root);
+                        }
+
                         return Task.CompletedTask;
                     })
             );
