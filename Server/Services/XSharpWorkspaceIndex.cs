@@ -308,6 +308,33 @@ namespace XSharpLanguageServer.Services
         // Diagnostics
         // ====================================================================
 
+        /// <summary>
+        /// Returns all symbols declared in <paramref name="filePath"/>, sorted by
+        /// ascending start line.  Used by call hierarchy to find the enclosing
+        /// function/method for a given call-site line number.
+        /// </summary>
+        public IReadOnlyList<WorkspaceSymbol> GetSymbolsInFile(string filePath)
+        {
+            var normalized = NormalizePath(filePath);
+
+            _rwLock.EnterReadLock();
+            try
+            {
+                if (_byFile.TryGetValue(normalized, out var symbols))
+                {
+                    var sorted = new List<WorkspaceSymbol>(symbols);
+                    sorted.Sort((a, b) => a.StartLine.CompareTo(b.StartLine));
+                    return sorted;
+                }
+            }
+            finally
+            {
+                _rwLock.ExitReadLock();
+            }
+
+            return Array.Empty<WorkspaceSymbol>();
+        }
+
         /// <summary>Returns the number of source files currently indexed.</summary>
         public int IndexedFileCount
         {

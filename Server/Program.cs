@@ -142,6 +142,8 @@ namespace XSharpLanguageServer
                      .WithHandler<XSharpSelectionRangeHandler>()
                      // On-type formatting: auto-indent closing keywords on Enter
                      .WithHandler<XSharpOnTypeFormattingHandler>()
+                     // Call hierarchy: prepare / incoming calls / outgoing calls
+                     .WithHandler<XSharpCallHierarchyHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
