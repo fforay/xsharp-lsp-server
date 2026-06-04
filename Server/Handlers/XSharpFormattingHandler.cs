@@ -40,6 +40,12 @@ namespace XSharpLanguageServer.Handlers
         private static readonly IReadOnlyDictionary<int, string> _keywordMap =
             BuildKeywordMap();
 
+        /// <summary>
+        /// Exposes the keyword map for use by <see cref="XSharpCodeActionHandler"/>.
+        /// Maps token type → canonical UPPER-CASE spelling.
+        /// </summary>
+        internal static IReadOnlyDictionary<int, string> KeywordMap => _keywordMap;
+
         private static Dictionary<int, string> BuildKeywordMap()
         {
             var map = new Dictionary<int, string>();

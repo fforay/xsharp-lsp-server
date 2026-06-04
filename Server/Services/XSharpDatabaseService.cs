@@ -291,6 +291,39 @@ namespace XSharpLanguageServer.Services
         }
 
         /// <summary>
+        /// Returns the namespace of an assembly-level type by exact name, or
+        /// <c>null</c> when the type is not found or has no namespace recorded.
+        /// Used by the "Add USING" code action.
+        /// </summary>
+        public string? FindAssemblyTypeNamespace(string name)
+        {
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(name)) return null;
+
+            try
+            {
+                const string sql = @"
+                    SELECT rt.Namespace
+                    FROM   ReferencedTypes rt
+                    WHERE  rt.Name = @name COLLATE NOCASE
+                      AND  rt.Namespace IS NOT NULL
+                      AND  rt.Namespace != ''
+                    LIMIT  1";
+
+                using var cmd = new SqliteCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@name", name);
+                var result = cmd.ExecuteScalar();
+                return result as string;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "FindAssemblyTypeNamespace failed for '{Name}'", name);
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Looks up an assembly-level symbol by exact name.
         /// Searches <c>ReferencedTypes</c> then <c>ReferencedGlobals</c>.
         /// Returns <c>null</c> if not found or DB unavailable.
