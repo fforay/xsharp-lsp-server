@@ -117,7 +117,8 @@ namespace XSharpLanguageServer.Services
                 // ── Type declarations ─────────────────────────────────────────
                 case XSharpParser.Class_Context cls when cls.Id != null:
                     Add(results, cls.Id.GetText(), XSharpSymbolKind.Class,
-                        returnType: null, cls, filePath, lines, currentTypeName);
+                        returnType: null, cls, filePath, lines, currentTypeName,
+                        inheritsFrom: cls.BaseType?.GetText());
                     WalkMembers(cls._Members, filePath, lines, cls.Id.GetText(), results);
                     break;
 
@@ -282,7 +283,8 @@ namespace XSharpLanguageServer.Services
             XSharpParserRuleContext ctx,
             string filePath,
             string[] lines,
-            string? typeName)
+            string? typeName,
+            string? inheritsFrom = null)
         {
             if (string.IsNullOrWhiteSpace(name)) return;
 
@@ -298,14 +300,15 @@ namespace XSharpLanguageServer.Services
 
             results.Add(new WorkspaceSymbol
             {
-                Name       = name,
-                Kind       = kind,
-                ReturnType = string.IsNullOrEmpty(returnType) ? null : returnType,
-                Sourcecode = sourcecode,
-                FileName   = filePath,
-                StartLine  = startLine,
-                StartCol   = startCol,
-                TypeName   = typeName,
+                Name        = name,
+                Kind        = kind,
+                ReturnType  = string.IsNullOrEmpty(returnType) ? null : returnType,
+                Sourcecode  = sourcecode,
+                FileName    = filePath,
+                StartLine   = startLine,
+                StartCol    = startCol,
+                TypeName    = typeName,
+                InheritsFrom = string.IsNullOrEmpty(inheritsFrom) ? null : inheritsFrom,
             });
         }
     }

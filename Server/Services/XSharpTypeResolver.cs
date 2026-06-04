@@ -47,6 +47,17 @@ namespace XSharpLanguageServer.Services
             if (string.Equals(rawIdentifier, "SELF", StringComparison.OrdinalIgnoreCase))
                 return FindEnclosingClassName(tree, cursor);
 
+            // SUPER → resolve to the parent class (InheritsFrom of the enclosing class).
+            if (string.Equals(rawIdentifier, "SUPER", StringComparison.OrdinalIgnoreCase))
+            {
+                var enclosing = FindEnclosingClassName(tree, cursor);
+                if (enclosing == null) return null;
+                var classSym = workspaceIndex.FindExact(enclosing);
+                return classSym?.InheritsFrom is { Length: > 0 } parent
+                    ? CleanTypeName(parent)
+                    : null;
+            }
+
             // Locate the enclosing function/method and the enclosing class.
             FindEnclosingScope(tree, cursor,
                 out var funcCtx,

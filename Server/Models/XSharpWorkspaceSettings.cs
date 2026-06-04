@@ -29,5 +29,14 @@ namespace XSharpLanguageServer.Models
         /// Defaults to empty.
         /// </summary>
         public string PreprocessorSymbols { get; set; } = "";
+
+        /// <summary>
+        /// When <c>true</c>, the server runs an additional semantic analysis pass
+        /// after each parse and publishes extra diagnostics (e.g. wrong argument
+        /// count).  Off by default because some checks may produce false positives
+        /// without full type resolution.
+        /// Controlled by <c>xsharp.semanticDiagnostics</c> in VS Code settings.
+        /// </summary>
+        public bool SemanticDiagnostics { get; set; } = false;
     }
 }

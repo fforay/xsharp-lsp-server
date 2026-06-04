@@ -105,6 +105,10 @@ namespace XSharpLanguageServer
                         // wired into XSharpDocumentService below (after server build),
                         // because ILanguageServerFacade is not available inside WithServices.
                         services.AddSingleton<XSharpDiagnosticsPublisher>();
+
+                        // Semantic diagnostics: opt-in analysis pass (xsharp.semanticDiagnostics).
+                        // Wired into XSharpDocumentService post-build alongside the publisher.
+                        services.AddSingleton<XSharpSemanticDiagnosticsService>();
                     })
                     // Document sync: didOpen / didChange / didSave / didClose
                     .WithHandler<XSharpTextDocumentSyncHandler>()
@@ -176,6 +180,9 @@ namespace XSharpLanguageServer
             var docService    = server.Services.GetRequiredService<XSharpDocumentService>();
             var diagPublisher = server.Services.GetRequiredService<XSharpDiagnosticsPublisher>();
             docService.SetDiagnosticsPublisher(diagPublisher);
+
+            var semanticService = server.Services.GetRequiredService<XSharpSemanticDiagnosticsService>();
+            docService.SetSemanticDiagnosticsService(semanticService);
 
             // Block until the client sends shutdown + exit.
             await server.WaitForExit;

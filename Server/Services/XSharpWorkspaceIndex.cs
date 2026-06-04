@@ -216,27 +216,73 @@ namespace XSharpLanguageServer.Services
 
         /// <summary>
         /// Returns all members of the type whose name exactly matches
-        /// <paramref name="typeName"/> (case-insensitive).
+        /// <paramref name="typeName"/> (case-insensitive), including inherited
+        /// members from the <c>INHERIT</c> chain (up to 10 levels deep).
         /// Used for member completion after <c>.</c> or <c>:</c>.
         /// </summary>
         public IReadOnlyList<WorkspaceSymbol> GetMembersOf(string typeName)
         {
             if (string.IsNullOrEmpty(typeName)) return Array.Empty<WorkspaceSymbol>();
 
+            var result  = new List<WorkspaceSymbol>();
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectMembers(typeName, result, visited, depth: 0);
+            return result;
+        }
+
+        private void CollectMembers(
+            string typeName,
+            List<WorkspaceSymbol> result,
+            HashSet<string> visited,
+            int depth)
+        {
+            if (depth > 10) return;                         // guard against deep chains
+            if (!visited.Add(typeName)) return;             // cycle guard
+
             var upper = typeName.ToUpperInvariant();
+
+            // Collect direct members and the parent class name in one lock.
+            string? parentName = null;
 
             _rwLock.EnterReadLock();
             try
             {
                 if (_byTypeName.TryGetValue(upper, out var members))
-                    return members.ToList();
+                    result.AddRange(members);
+
+                // Find the class declaration to get InheritsFrom.
+                if (_byName.TryGetValue(upper, out var declarations))
+                {
+                    foreach (var decl in declarations)
+                    {
+                        if (decl.Kind == XSharpSymbolKind.Class
+                            && !string.IsNullOrEmpty(decl.InheritsFrom))
+                        {
+                            parentName = decl.InheritsFrom;
+                            break;
+                        }
+                    }
+                }
             }
             finally
             {
                 _rwLock.ExitReadLock();
             }
 
-            return Array.Empty<WorkspaceSymbol>();
+            // Recurse for parent outside the lock (ReaderWriterLockSlim is non-recursive).
+            if (parentName != null)
+                CollectMembers(CleanInheritedName(parentName), result, visited, depth + 1);
+        }
+
+        // Strip namespace prefix and generic parameters from an INHERIT clause name
+        // so "System.Object" or "List<T>" becomes a simple name for index lookup.
+        private static string CleanInheritedName(string raw)
+        {
+            int lt = raw.IndexOf('<');
+            if (lt > 0) raw = raw[..lt];
+            raw = raw.Trim();
+            int dot = raw.LastIndexOf('.');
+            return dot >= 0 ? raw[(dot + 1)..] : raw;
         }
 
         /// <summary>

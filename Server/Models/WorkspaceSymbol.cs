@@ -37,5 +37,13 @@ namespace XSharpLanguageServer.Models
         /// Name of the declaring type, or <c>null</c> for top-level types and global functions.
         /// </summary>
         public string? TypeName { get; init; }
+
+        /// <summary>
+        /// Name of the parent class from the <c>INHERIT</c> clause, or <c>null</c>
+        /// when not a class declaration or no parent is specified.
+        /// Used by <see cref="XSharpLanguageServer.Services.XSharpWorkspaceIndex.GetMembersOf"/>
+        /// to walk the inheritance chain for member completion.
+        /// </summary>
+        public string? InheritsFrom { get; init; }
     }
 }

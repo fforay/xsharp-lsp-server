@@ -89,6 +89,7 @@ namespace XSharpLanguageServer.Services
                     Dialect             = xsharp["dialect"]?.Value<string>()             ?? GetSettings().Dialect,
                     IncludePaths        = xsharp["includePaths"]?.Value<string>()        ?? GetSettings().IncludePaths,
                     PreprocessorSymbols = xsharp["preprocessorSymbols"]?.Value<string>() ?? GetSettings().PreprocessorSymbols,
+                    SemanticDiagnostics = xsharp["semanticDiagnostics"]?.Value<bool>()  ?? GetSettings().SemanticDiagnostics,
                 };
 
                 Apply(settings);

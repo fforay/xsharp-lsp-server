@@ -94,6 +94,12 @@ namespace XSharpLanguageServer.Services
         /// </summary>
         private XSharpDiagnosticsPublisher? _diagnosticsPublisher;
 
+        /// <summary>
+        /// Optional semantic diagnostics service, wired in post-build alongside
+        /// <see cref="SetDiagnosticsPublisher"/>.
+        /// </summary>
+        private XSharpSemanticDiagnosticsService? _semanticService;
+
         // Two separate dictionaries so handlers can read text cheaply
         // without touching the (heavier) parse result.
         private readonly Dictionary<DocumentUri, string> _texts = new();
@@ -124,6 +130,15 @@ namespace XSharpLanguageServer.Services
         public void SetDiagnosticsPublisher(XSharpDiagnosticsPublisher publisher)
         {
             _diagnosticsPublisher = publisher;
+        }
+
+        /// <summary>
+        /// Wires in the semantic diagnostics service after the OmniSharp server
+        /// is fully started (same pattern as <see cref="SetDiagnosticsPublisher"/>).
+        /// </summary>
+        public void SetSemanticDiagnosticsService(XSharpSemanticDiagnosticsService service)
+        {
+            _semanticService = service;
         }
 
         // ----------------------------------------------------------------
@@ -297,18 +312,34 @@ namespace XSharpLanguageServer.Services
 
                 var diagnostics = errorListener.Diagnostics;
 
+                // Semantic analysis pass (opt-in via xsharp.semanticDiagnostics).
+                IReadOnlyList<Diagnostic> allDiagnostics = diagnostics;
+                if (_semanticService != null
+                    && tree != null
+                    && _configService.GetSettings().SemanticDiagnostics)
+                {
+                    var semantic = _semanticService.Analyze(tree, fileName);
+                    if (semantic.Count > 0)
+                    {
+                        var merged = new List<Diagnostic>(diagnostics.Count + semantic.Count);
+                        merged.AddRange(diagnostics);
+                        merged.AddRange(semantic);
+                        allDiagnostics = merged;
+                    }
+                }
+
                 _logger.LogInformation(
                     "Parsed {Uri}: ok={Ok}, tokens={Tokens}, diagnostics={Diag}",
                     uri,
                     ok,
                     (tokenStream as BufferedTokenStream)?.GetTokens().Count ?? 0,
-                    diagnostics.Count);
+                    allDiagnostics.Count);
 
                 var result = new ParsedDocument(
                     text,
                     tokenStream,
                     tree,
-                    diagnostics,
+                    allDiagnostics,
                     includeFiles ?? new List<string>());
 
                 lock (_lock)
