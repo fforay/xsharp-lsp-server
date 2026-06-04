@@ -171,13 +171,16 @@ namespace XSharpLanguageServer.Handlers
         // Fields
         // ----------------------------------------------------------------
         private readonly XSharpDocumentService              _documentService;
+        private readonly XSharpConfigurationService         _configService;
         private readonly ILogger<XSharpFormattingHandler>   _logger;
 
         public XSharpFormattingHandler(
             XSharpDocumentService               documentService,
+            XSharpConfigurationService          configService,
             ILogger<XSharpFormattingHandler>    logger)
         {
             _documentService = documentService;
+            _configService   = configService;
             _logger          = logger;
         }
 
@@ -222,7 +225,8 @@ namespace XSharpLanguageServer.Handlers
                 bool insertSpaces = request.Options.InsertSpaces;
                 string indentUnit = insertSpaces ? new string(' ', tabSize) : "\t";
 
-                string formatted = Format(originalText, allTokens, indentUnit);
+                var settings = _configService.GetSettings();
+                string formatted = Format(originalText, allTokens, indentUnit, settings);
 
                 if (formatted == originalText)
                     return Task.FromResult<TextEditContainer?>(null);   // nothing changed
@@ -256,7 +260,8 @@ namespace XSharpLanguageServer.Handlers
         private string Format(
             string        originalText,
             IList<IToken> tokens,
-            string        indentUnit)
+            string        indentUnit,
+            Models.XSharpWorkspaceSettings settings)
         {
             // Split original into lines (preserve \r\n vs \n).
             bool hasCr = originalText.Contains('\r');
@@ -312,8 +317,12 @@ namespace XSharpLanguageServer.Handlers
                 }
 
                 bool isCodeBlockHeader  = firstReal != null && _codeBlockHeaders.Contains(firstReal.Type);
-                bool isTypeOpener       = firstReal != null && _typeOpeners.Contains(firstReal.Type);
-                bool isTypeCloser       = firstReal != null && IsTypeCloser(firstReal, lineTokens);
+                bool isTypeOpener       = firstReal != null && (
+                                              _typeOpeners.Contains(firstReal.Type) ||
+                                              (settings.IndentNamespace && firstReal.Type == XSharpLexer.NAMESPACE));
+                bool isTypeCloser       = firstReal != null && IsTypeCloser(firstReal, lineTokens, settings.IndentNamespace);
+                bool isCaseBranch       = firstReal != null &&
+                                          (firstReal.Type == XSharpLexer.CASE || firstReal.Type == XSharpLexer.OTHERWISE);
                 bool isEndMember        = !isTypeCloser && firstReal != null && IsEndMember(firstReal, lineTokens);
                 bool isSubBlockEnd      = !isTypeCloser && !isEndMember
                                           && firstReal != null && IsSubBlockEnd(firstReal, lineTokens);
@@ -356,14 +365,19 @@ namespace XSharpLanguageServer.Handlers
                 }
                 else if (firstReal != null && _indentClose.Contains(firstReal.Type))
                 {
-                    indentLevel = Math.Max(0, indentLevel - 1);
+                    // CASE / OTHERWISE: only close-before-write when IndentCaseLabel = false
+                    // (they should align with DO CASE / SWITCH, not sit inside it).
+                    if (!isCaseBranch || !settings.IndentCaseLabel)
+                        indentLevel = Math.Max(0, indentLevel - 1);
                 }
 
                 // ---- Write line ----
-                string lineContent = RebuildLine(origLine, lineTokens);
+                string lineContent = RebuildLine(origLine, lineTokens, settings.KeywordCase);
                 string indent      = BuildIndent(indentLevel, indentUnit);
-                sb.Append(indent);
-                sb.Append(lineContent.TrimStart());
+                string fullLine    = indent + lineContent.TrimStart();
+                if (settings.TrimTrailingWhitespace)
+                    fullLine = fullLine.TrimEnd();
+                sb.Append(fullLine);
 
                 if (ln < maxLine) sb.Append(nl);
 
@@ -377,12 +391,22 @@ namespace XSharpLanguageServer.Handlers
                 else if (!isTypeCloser && !isEndMember && !isSubBlockEnd && !isGenericEnd
                          && firstReal != null && _indentOpen.Contains(firstReal.Type))
                 {
-                    indentLevel++;
-                    if (isTypeOpener) { inMember = false; memberBodyOpen = false; }
+                    // CASE / OTHERWISE: only open-after-write when IndentCaseLabel = false
+                    // (body is indented relative to the DO CASE level, not an extra level).
+                    if (!isCaseBranch || !settings.IndentCaseLabel)
+                    {
+                        indentLevel++;
+                        if (isTypeOpener) { inMember = false; memberBodyOpen = false; }
+                    }
                 }
             }
 
-            return sb.ToString();
+            string result = sb.ToString();
+
+            if (settings.InsertFinalNewline && !result.EndsWith(nl))
+                result += nl;
+
+            return result;
         }
 
         // ----------------------------------------------------------------
@@ -394,15 +418,18 @@ namespace XSharpLanguageServer.Handlers
         /// (CLASS/INTERFACE/STRUCTURE): either a single <c>ENDCLASS</c> token or a two-token
         /// <c>END CLASS</c> / <c>END INTERFACE</c> / <c>END STRUCTURE</c> sequence.
         /// </summary>
-        private static bool IsTypeCloser(IToken firstReal, List<IToken> lineTokens)
+        private static bool IsTypeCloser(IToken firstReal, List<IToken> lineTokens,
+                                          bool indentNamespace = false)
         {
             if (_typeClosers.Contains(firstReal.Type)) return true;
             if (firstReal.Type == XSharpLexer.END)
             {
                 int next = GetNextRealType(firstReal, lineTokens);
-                return next == XSharpLexer.CLASS
-                    || next == XSharpLexer.INTERFACE
-                    || next == XSharpLexer.STRUCTURE;
+                if (next == XSharpLexer.CLASS || next == XSharpLexer.INTERFACE
+                                               || next == XSharpLexer.STRUCTURE)
+                    return true;
+                if (indentNamespace && next == XSharpLexer.NAMESPACE)
+                    return true;
             }
             return false;
         }
@@ -464,7 +491,8 @@ namespace XSharpLanguageServer.Handlers
         /// keyword token spans with their canonical uppercase text.
         /// Non-keyword spans are preserved verbatim (string literals, comments, IDs, etc.).
         /// </summary>
-        private string RebuildLine(string origLine, List<IToken> lineTokens)
+        private string RebuildLine(string origLine, List<IToken> lineTokens,
+                                    string keywordCase = "Upper")
         {
             if (origLine.Length == 0) return origLine;
 
@@ -477,7 +505,12 @@ namespace XSharpLanguageServer.Handlers
                 // Never rewrite string literals or comments — preserve verbatim.
                 if (XSharpLexer.IsString(t.Type))  continue;
                 if (XSharpLexer.IsComment(t.Type)) continue;
-                if (!_keywordMap.TryGetValue(t.Type, out string? canonical)) continue;
+                if (!_keywordMap.TryGetValue(t.Type, out string? upper)) continue;
+
+                // Apply keyword case setting.
+                string? canonical = ApplyKeywordCase(upper, keywordCase);
+                if (canonical == null) continue;  // "None" — skip transformation
+
                 if (string.Equals(t.Text, canonical, StringComparison.Ordinal)) continue;
 
                 int col = t.Column;   // 0-based
@@ -505,6 +538,21 @@ namespace XSharpLanguageServer.Handlers
 
             return sb.ToString();
         }
+
+        /// <summary>
+        /// Transforms a canonical UPPER-CASE keyword into the target case.
+        /// Returns <c>null</c> when <paramref name="setting"/> is <c>"None"</c>
+        /// (caller should skip the transformation entirely).
+        /// </summary>
+        internal static string? ApplyKeywordCase(string upper, string setting) => setting switch
+        {
+            "Lower" => upper.ToLowerInvariant(),
+            "Title" => string.Concat(
+                           char.ToUpperInvariant(upper[0]).ToString(),
+                           upper[1..].ToLowerInvariant()),
+            "None"  => null,
+            _       => upper,   // "Upper" (default)
+        };
 
         private static string BuildIndent(int level, string unit)
         {

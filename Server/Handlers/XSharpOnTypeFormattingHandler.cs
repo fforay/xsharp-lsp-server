@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using XSharpLanguageServer.Services;
+using LspRange = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
 
 namespace XSharpLanguageServer.Handlers
 {
@@ -25,7 +26,8 @@ namespace XSharpLanguageServer.Handlers
     /// </summary>
     public class XSharpOnTypeFormattingHandler : DocumentOnTypeFormattingHandlerBase
     {
-        private readonly XSharpDocumentService _documentService;
+        private readonly XSharpDocumentService      _documentService;
+        private readonly XSharpConfigurationService _configService;
         private readonly ILogger<XSharpOnTypeFormattingHandler> _logger;
 
         // ── Keyword specs ────────────────────────────────────────────────────
@@ -46,6 +48,17 @@ namespace XSharpLanguageServer.Handlers
             ["CATCH"]   = new(["TRY"],                    ["ENDTRY"]),
             ["FINALLY"] = new(["TRY"],                    ["ENDTRY"]),
             ["ENDWITH"] = new(["WITH"],                   ["ENDWITH"]),
+            // CASE / OTHERWISE always align with DO CASE / SWITCH (not indented inside).
+            // Controlled by IndentCase setting: when true the realignment is skipped.
+            ["CASE"]      = new(["DO CASE", "SWITCH"],    ["ENDCASE"]),
+            ["OTHERWISE"] = new(["DO CASE", "SWITCH"],    ["ENDCASE"]),
+        };
+
+        // Function/method header keywords — trigger IndentFunctionBody check.
+        private static readonly HashSet<string> _funcHeaders = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "FUNCTION", "PROCEDURE", "METHOD", "ACCESS", "ASSIGN",
+            "CONSTRUCTOR", "DESTRUCTOR", "OPERATOR", "PROPERTY",
         };
 
         // Generic block openers/closers for the bare "END" keyword.
@@ -60,10 +73,12 @@ namespace XSharpLanguageServer.Handlers
         ];
 
         public XSharpOnTypeFormattingHandler(
-            XSharpDocumentService documentService,
+            XSharpDocumentService      documentService,
+            XSharpConfigurationService configService,
             ILogger<XSharpOnTypeFormattingHandler> logger)
         {
             _documentService = documentService;
+            _configService   = configService;
             _logger          = logger;
         }
 
@@ -106,15 +121,29 @@ namespace XSharpLanguageServer.Handlers
                     return Task.FromResult<TextEditContainer?>(null);
 
                 // Find the indent the closing keyword should use.
+                var settings = _configService.GetSettings();
                 string? openerIndent = null;
 
                 if (_specs.TryGetValue(keyword, out var spec))
                 {
+                    // CASE / OTHERWISE: respect IndentCase setting.
+                    // When IndentCase = true the user wants these keywords indented
+                    // inside DO CASE/SWITCH, so skip the realignment.
+                    bool isCaseBranch = string.Equals(keyword, "CASE",      StringComparison.OrdinalIgnoreCase)
+                                     || string.Equals(keyword, "OTHERWISE", StringComparison.OrdinalIgnoreCase);
+                    if (isCaseBranch && settings.IndentCase)
+                        return Task.FromResult<TextEditContainer?>(null);
+
                     openerIndent = FindOpenerIndent(lines, completedLine - 1, spec);
                 }
                 else if (string.Equals(keyword, "END", StringComparison.OrdinalIgnoreCase))
                 {
                     openerIndent = FindGenericEndOpenerIndent(lines, completedLine - 1);
+                }
+                else if (_funcHeaders.Contains(keyword))
+                {
+                    // Function/method header — handle IndentFunctionBody.
+                    return HandleFunctionBodyIndentAsync(lines, completedLine, settings, request.Options);
                 }
 
                 if (openerIndent == null)
@@ -144,6 +173,50 @@ namespace XSharpLanguageServer.Handlers
                 _logger.LogError(ex, "OnTypeFormatting failed for {Uri}", request.TextDocument.Uri);
                 return Task.FromResult<TextEditContainer?>(null);
             }
+        }
+
+        // ====================================================================
+        // Function body indentation
+        // ====================================================================
+
+        private Task<TextEditContainer?> HandleFunctionBodyIndentAsync(
+            string[] lines,
+            int completedLine,
+            Models.XSharpWorkspaceSettings settings,
+            FormattingOptions options)
+        {
+            // The new (empty) line is completedLine + 1.
+            int newLineIdx = completedLine + 1;
+            if (newLineIdx >= lines.Length)
+                return Task.FromResult<TextEditContainer?>(null);
+
+            string funcLine    = lines[completedLine].TrimEnd('\r');
+            string funcIndent  = funcLine[..(funcLine.Length - funcLine.TrimStart().Length)];
+            string indentUnit  = options.InsertSpaces
+                ? new string(' ', (int)(options.TabSize > 0 ? options.TabSize : 4))
+                : "\t";
+
+            string newLine    = lines[newLineIdx].TrimEnd('\r');
+            string newIndent  = newLine[..(newLine.Length - newLine.TrimStart().Length)];
+
+            string targetIndent = settings.IndentFunctionBody
+                ? funcIndent + indentUnit   // one level deeper
+                : funcIndent;               // same level as the declaration
+
+            if (newIndent == targetIndent)
+                return Task.FromResult<TextEditContainer?>(null);
+
+            _logger.LogDebug(
+                "OnTypeFormatting: adjusting function body indent at line {L}", newLineIdx);
+
+            return Task.FromResult<TextEditContainer?>(new TextEditContainer(
+                new TextEdit
+                {
+                    Range   = new LspRange(
+                                  new Position(newLineIdx, 0),
+                                  new Position(newLineIdx, newIndent.Length)),
+                    NewText = targetIndent,
+                }));
         }
 
         // ====================================================================

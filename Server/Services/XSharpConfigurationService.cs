@@ -91,6 +91,19 @@ namespace XSharpLanguageServer.Services
                     PreprocessorSymbols = xsharp["preprocessorSymbols"]?.Value<string>() ?? GetSettings().PreprocessorSymbols,
                     SemanticDiagnostics  = xsharp["semanticDiagnostics"]?.Value<bool>()   ?? GetSettings().SemanticDiagnostics,
                     WarnOnUndefinedCalls = xsharp["warnOnUndefinedCalls"]?.Value<bool>() ?? GetSettings().WarnOnUndefinedCalls,
+                    // Indentation (maps to VS IndentingOptionsPage)
+                    IndentCaseLabel         = xsharp["indentCaseLabel"]?.Value<bool>()         ?? xsharp["indentCase"]?.Value<bool>()         ?? GetSettings().IndentCaseLabel,
+                    IndentCaseContent       = xsharp["indentCaseContent"]?.Value<bool>()       ?? GetSettings().IndentCaseContent,
+                    IndentBlockContent      = xsharp["indentBlockContent"]?.Value<bool>()      ?? xsharp["indentFunctionBody"]?.Value<bool>() ?? GetSettings().IndentBlockContent,
+                    IndentEntityContent     = xsharp["indentEntityContent"]?.Value<bool>()     ?? GetSettings().IndentEntityContent,
+                    IndentFieldContent      = xsharp["indentFieldContent"]?.Value<bool>()      ?? GetSettings().IndentFieldContent,
+                    IndentNamespace         = xsharp["indentNamespace"]?.Value<bool>()         ?? GetSettings().IndentNamespace,
+                    IndentMultiLines        = xsharp["indentMultiLines"]?.Value<bool>()        ?? GetSettings().IndentMultiLines,
+                    IndentPreprocessorLines = xsharp["indentPreprocessorLines"]?.Value<bool>() ?? GetSettings().IndentPreprocessorLines,
+                    // Formatting
+                    KeywordCase             = xsharp["keywordCase"]?.Value<string>()           ?? GetSettings().KeywordCase,
+                    TrimTrailingWhitespace  = xsharp["trimTrailingWhitespace"]?.Value<bool>()  ?? GetSettings().TrimTrailingWhitespace,
+                    InsertFinalNewline      = xsharp["insertFinalNewline"]?.Value<bool>()      ?? GetSettings().InsertFinalNewline,
                 };
 
                 Apply(settings);

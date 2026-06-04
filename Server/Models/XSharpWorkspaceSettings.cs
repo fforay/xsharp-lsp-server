@@ -48,5 +48,44 @@ namespace XSharpLanguageServer.Models
         /// Controlled by <c>xsharp.warnOnUndefinedCalls</c> in VS Code settings.
         /// </summary>
         public bool WarnOnUndefinedCalls { get; set; } = false;
+
+        /// <summary>
+        /// When <c>false</c> (default), <c>CASE</c> and <c>OTHERWISE</c> are
+        /// auto-aligned to the same indentation as their <c>DO CASE</c> / <c>SWITCH</c>
+        /// opener on Enter.  When <c>true</c>, they are left indented one level inside.
+        /// Controlled by <c>xsharp.indentCase</c>.
+        /// </summary>
+        // ── Indentation settings (mirrors Visual Studio IndentingOptionsPage) ──
+
+        /// <summary>Align CASE/OTHERWISE with DO CASE/SWITCH when false (default).</summary>
+        public bool IndentCaseLabel    { get; set; } = false;
+        /// <summary>Indent statements inside each CASE/OTHERWISE branch.</summary>
+        public bool IndentCaseContent  { get; set; } = true;
+        /// <summary>Indent statements inside FUNCTION/METHOD/PROCEDURE bodies.</summary>
+        public bool IndentBlockContent { get; set; } = true;
+        /// <summary>Indent multiline members inside CLASS/STRUCTURE.</summary>
+        public bool IndentEntityContent { get; set; } = true;
+        /// <summary>Indent single-line fields/properties inside CLASS/STRUCTURE.</summary>
+        public bool IndentFieldContent  { get; set; } = true;
+        /// <summary>Indent entities declared inside a NAMESPACE block.</summary>
+        public bool IndentNamespace     { get; set; } = false;
+        /// <summary>Indent continuation lines in multi-line statements.</summary>
+        public bool IndentMultiLines    { get; set; } = true;
+        /// <summary>Indent preprocessor directives with surrounding code.</summary>
+        public bool IndentPreprocessorLines { get; set; } = false;
+
+        // ── Formatting settings ───────────────────────────────────────────────
+        /// <summary>Keyword case: None, Upper (default), Lower, Title.</summary>
+        public string KeywordCase          { get; set; } = "Upper";
+        /// <summary>Remove trailing whitespace when formatting.</summary>
+        public bool   TrimTrailingWhitespace { get; set; } = true;
+        /// <summary>Insert a final newline at end of file when formatting.</summary>
+        public bool   InsertFinalNewline   { get; set; } = false;
+
+        // ── Legacy aliases kept for backward compatibility ────────────────────
+        /// <summary>Alias for <see cref="IndentCaseLabel"/>.</summary>
+        public bool IndentCase         { get => IndentCaseLabel;    set => IndentCaseLabel    = value; }
+        /// <summary>Alias for <see cref="IndentBlockContent"/>.</summary>
+        public bool IndentFunctionBody { get => IndentBlockContent; set => IndentBlockContent = value; }
     }
 }
