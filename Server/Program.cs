@@ -138,6 +138,8 @@ namespace XSharpLanguageServer
                      .WithHandler<XSharpInlayHintsHandler>()
                      // Watched files: re-index or remove files changed outside the editor
                      .WithHandler<XSharpDidChangeWatchedFilesHandler>()
+                     // Selection range: smart expand/shrink selection (Alt+Shift+→)
+                     .WithHandler<XSharpSelectionRangeHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
