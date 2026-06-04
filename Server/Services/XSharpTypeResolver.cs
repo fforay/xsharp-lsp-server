@@ -81,7 +81,7 @@ namespace XSharpLanguageServer.Services
             // 2. LOCAL declarations in the function body, before the cursor.
             if (funcCtx != null)
             {
-                var localType = FindLocalType(funcCtx, cursor, rawIdentifier);
+                var localType = FindLocalType(funcCtx, cursor, rawIdentifier, workspaceIndex);
                 if (localType != null) return localType;
             }
 
@@ -180,40 +180,117 @@ namespace XSharpLanguageServer.Services
         private static string? FindLocalType(
             XSharpParserRuleContext funcCtx,
             Position cursor,
-            string identifier)
+            string identifier,
+            XSharpWorkspaceIndex workspaceIndex)
         {
-            return WalkForLocal(funcCtx, cursor, identifier);
+            return WalkForLocal(funcCtx, cursor, identifier, workspaceIndex);
         }
 
-        private static string? WalkForLocal(IParseTree node, Position cursor, string identifier)
+        private static string? WalkForLocal(
+            IParseTree node,
+            Position cursor,
+            string identifier,
+            XSharpWorkspaceIndex workspaceIndex)
         {
             if (node is not XSharpParserRuleContext ctx) return null;
 
-            if (ctx is XSharpParser.CommonLocalDeclContext decl)
-            {
-                // Only declarations that appear before the cursor line.
-                int declLine = Math.Max(0, ctx.Start.Line - 1);
-                if (declLine < cursor.Line && decl._LocalVars != null)
-                {
-                    foreach (var lv in decl._LocalVars)
-                    {
-                        if (lv.Id == null) continue;
-                        if (!string.Equals(lv.Id.GetText(), identifier,
-                                StringComparison.OrdinalIgnoreCase)) continue;
+            int declLine = Math.Max(0, ctx.Start.Line - 1);
 
-                        var t = CleanTypeName(lv.DataType?.GetText());
-                        if (t != null) return t;
+            // ── LOCAL foo AS SomeClass  /  LOCAL foo := expr ──────────────
+            if (ctx is XSharpParser.CommonLocalDeclContext decl
+                && declLine < cursor.Line
+                && decl._LocalVars != null)
+            {
+                foreach (var lv in decl._LocalVars)
+                {
+                    if (lv.Id == null) continue;
+                    if (!string.Equals(lv.Id.GetText(), identifier,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // Explicit AS clause — most reliable.
+                    var t = CleanTypeName(lv.DataType?.GetText());
+                    if (t != null) return t;
+
+                    // Initializer inference: LOCAL foo := SomeClass{} or := GetFoo().
+                    if (lv.Expression != null)
+                    {
+                        var inferred = InferTypeFromExpression(lv.Expression, workspaceIndex);
+                        if (inferred != null) return inferred;
+                    }
+                }
+            }
+
+            // ── VAR foo := expr  /  LOCAL foo := expr (implied) ──────────
+            if (ctx is XSharpParser.VarLocalDeclContext varDecl
+                && declLine < cursor.Line
+                && varDecl._ImpliedVars != null)
+            {
+                foreach (var iv in varDecl._ImpliedVars)
+                {
+                    if (iv.Id == null) continue;
+                    if (!string.Equals(iv.Id.GetText(), identifier,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+
+                    if (iv.Expression != null)
+                    {
+                        var inferred = InferTypeFromExpression(iv.Expression, workspaceIndex);
+                        if (inferred != null) return inferred;
                     }
                 }
             }
 
             for (int i = 0; i < node.ChildCount; i++)
             {
-                var result = WalkForLocal(node.GetChild(i), cursor, identifier);
+                var result = WalkForLocal(node.GetChild(i), cursor, identifier, workspaceIndex);
                 if (result != null) return result;
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Walks an initializer expression subtree looking for:
+        /// <list type="bullet">
+        ///   <item><c>CtorCallContext</c> — <c>SomeClass{}</c> or <c>SomeClass()</c>;
+        ///         the type is read directly from <c>Type</c>.</item>
+        ///   <item><c>MethodCallContext</c> — <c>GetFoo()</c>; the return type of
+        ///         <c>GetFoo</c> is looked up in the workspace index.</item>
+        /// </list>
+        /// Returns <c>null</c> when the expression cannot be resolved.
+        /// </summary>
+        private static string? InferTypeFromExpression(
+            IParseTree node,
+            XSharpWorkspaceIndex workspaceIndex)
+        {
+            if (node is XSharpParser.CtorCallContext ctor)
+                return CleanTypeName(ctor.Type?.GetText());
+
+            if (node is XSharpParser.MethodCallContext mc)
+            {
+                string callee = SimpleName(mc.Expr?.GetText() ?? string.Empty);
+                if (!string.IsNullOrEmpty(callee))
+                {
+                    var sym = workspaceIndex.FindExact(callee);
+                    return CleanTypeName(sym?.ReturnType);
+                }
+            }
+
+            // Recurse into child nodes (e.g. PrimaryExpressionContext wrapper).
+            for (int i = 0; i < node.ChildCount; i++)
+            {
+                var result = InferTypeFromExpression(node.GetChild(i), workspaceIndex);
+                if (result != null) return result;
+            }
+
+            return null;
+        }
+
+        private static string SimpleName(string expr)
+        {
+            int colon = expr.LastIndexOf(':');
+            int dot   = expr.LastIndexOf('.');
+            int sep   = Math.Max(colon, dot);
+            return sep >= 0 ? expr[(sep + 1)..] : expr;
         }
 
         // ====================================================================
