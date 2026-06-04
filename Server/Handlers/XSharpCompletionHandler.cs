@@ -146,6 +146,16 @@ namespace XSharpLanguageServer.Handlers
 
                 if (memberTypeName != null)
                 {
+                    // Resolve the raw identifier to an actual type name.
+                    if (parsed?.Tree != null)
+                    {
+                        memberTypeName = XSharpTypeResolver.Resolve(
+                            parsed.Tree,
+                            request.Position,
+                            memberTypeName,
+                            _workspaceIndex) ?? memberTypeName;
+                    }
+
                     // Member access: foo. or foo: → workspace index only
                     // (no ReferencedMembers table in the DB)
                     foreach (var sym in _workspaceIndex.GetMembersOf(memberTypeName))

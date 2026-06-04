@@ -224,7 +224,7 @@ namespace XSharpLanguageServer.Services
                     foreach (var v in cvars._Vars)
                         if (v.Id != null)
                             Add(results, v.Id.GetText(), XSharpSymbolKind.Field,
-                                returnType: null, cvars, filePath, lines, currentTypeName);
+                                returnType: v.DataType?.GetText(), cvars, filePath, lines, currentTypeName);
                     break;
 
                 // ── Anything else — recurse in case it wraps declarations ─────
