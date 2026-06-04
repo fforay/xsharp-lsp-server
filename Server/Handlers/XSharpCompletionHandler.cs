@@ -431,14 +431,41 @@ namespace XSharpLanguageServer.Handlers
             char trigger = text[offset - 1];
             if (trigger != '.' && trigger != ':') return null;
 
-            // Scan backwards over the identifier before the trigger
-            int end = offset - 1;
-            int start = end;
+            // Skip any whitespace between trigger and what precedes it.
+            int beforeTrigger = offset - 2;
+            while (beforeTrigger >= 0 && char.IsWhiteSpace(text[beforeTrigger]))
+                beforeTrigger--;
+
+            if (beforeTrigger < 0) return null;
+
+            // ── Chained call: Name():  ────────────────────────────────────
+            if (text[beforeTrigger] == ')')
+            {
+                // Find the '(' that matches this ')'.
+                int depth = 1;
+                int pos   = beforeTrigger - 1;
+                while (pos >= 0 && depth > 0)
+                {
+                    if      (text[pos] == ')') depth++;
+                    else if (text[pos] == '(') depth--;
+                    pos--;
+                }
+                // pos is now just before '(' — skip whitespace then extract name.
+                while (pos >= 0 && char.IsWhiteSpace(text[pos])) pos--;
+                int nameEnd = pos + 1;
+                while (pos >= 0 && IsWordChar(text[pos])) pos--;
+                int nameStart = pos + 1;
+                if (nameStart >= nameEnd) return null;
+                return text.Substring(nameStart, nameEnd - nameStart);
+            }
+
+            // ── Plain identifier: foo:  ───────────────────────────────────
+            int end   = beforeTrigger + 1;
+            int start = beforeTrigger;
             while (start > 0 && IsWordChar(text[start - 1]))
                 start--;
 
-            if (start == end) return null;   // nothing before the trigger
-
+            if (start == end) return null;
             return text.Substring(start, end - start);
         }
 

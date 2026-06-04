@@ -130,8 +130,10 @@ namespace XSharpLanguageServer
                     .WithHandler<XSharpDidChangeConfigurationHandler>()
                      // References: textDocument/references (find all usages in open docs + DB declarations)
                      .WithHandler<XSharpReferencesHandler>()
-                     // Rename: textDocument/rename (rename symbol across all open docs)
+                     // Rename: textDocument/rename (rename symbol across all project files)
                      .WithHandler<XSharpRenameHandler>()
+                     // Prepare rename: validate symbol + pre-select range before dialog
+                     .WithHandler<XSharpPrepareRenameHandler>()
                      // Formatting: textDocument/formatting (keyword casing + indentation)
                      .WithHandler<XSharpFormattingHandler>()
                      // Workspace symbol: workspace/symbol (project-wide symbol search)

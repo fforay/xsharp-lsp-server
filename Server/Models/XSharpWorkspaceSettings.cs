@@ -38,5 +38,15 @@ namespace XSharpLanguageServer.Models
         /// Controlled by <c>xsharp.semanticDiagnostics</c> in VS Code settings.
         /// </summary>
         public bool SemanticDiagnostics { get; set; } = false;
+
+        /// <summary>
+        /// When <c>true</c> (and <see cref="SemanticDiagnostics"/> is also <c>true</c>),
+        /// the server emits an <c>XS0002</c> <see cref="DiagnosticSeverity.Information"/>
+        /// diagnostic for calls to functions not found in the workspace index or the
+        /// assembly database.  Off by default due to high false-positive risk from
+        /// FoxPro runtime functions and other external globals.
+        /// Controlled by <c>xsharp.warnOnUndefinedCalls</c> in VS Code settings.
+        /// </summary>
+        public bool WarnOnUndefinedCalls { get; set; } = false;
     }
 }

@@ -97,10 +97,18 @@ namespace XSharpLanguageServer.Services
                 }
             }
 
-            // 4. Identifier IS a known type name (static / class reference).
             var sym = workspaceIndex.FindExact(rawIdentifier);
-            if (sym != null && IsTypeKind(sym.Kind))
-                return rawIdentifier;
+            if (sym != null)
+            {
+                // 4. Identifier IS a known type name (static / class reference).
+                if (IsTypeKind(sym.Kind))
+                    return rawIdentifier;
+
+                // 5. Identifier is a callable — return its declared return type.
+                //    Supports chained-call completion: GetFoo():Bar.
+                if (!string.IsNullOrEmpty(sym.ReturnType))
+                    return CleanTypeName(sym.ReturnType);
+            }
 
             return null;
         }
