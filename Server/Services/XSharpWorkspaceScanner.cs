@@ -28,7 +28,7 @@ namespace XSharpLanguageServer.Services
         private readonly XSharpConfigurationService _configService;
         private readonly XSharpWorkspaceIndex _index;
 
-        private static readonly string[] SourceExtensions = { "*.prg", "*.xs", "*.xh" };
+        private static readonly string[] SourceExtensions = { "*.prg", "*.prgx", "*.xs", "*.xh", "*.ch" };
 
         public XSharpWorkspaceScanner(
             ILogger<XSharpWorkspaceScanner> logger,

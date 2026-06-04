@@ -88,12 +88,22 @@ namespace XSharpLanguageServer.Handlers
                     },
                     new OmniSharp.Extensions.LanguageServer.Protocol.Models.FileSystemWatcher
                     {
+                        GlobPattern = new GlobPattern("**/*.prgx"),
+                        Kind = WatchKind.Create | WatchKind.Change | WatchKind.Delete
+                    },
+                    new OmniSharp.Extensions.LanguageServer.Protocol.Models.FileSystemWatcher
+                    {
                         GlobPattern = new GlobPattern("**/*.xs"),
                         Kind = WatchKind.Create | WatchKind.Change | WatchKind.Delete
                     },
                     new OmniSharp.Extensions.LanguageServer.Protocol.Models.FileSystemWatcher
                     {
                         GlobPattern = new GlobPattern("**/*.xh"),
+                        Kind = WatchKind.Create | WatchKind.Change | WatchKind.Delete
+                    },
+                    new OmniSharp.Extensions.LanguageServer.Protocol.Models.FileSystemWatcher
+                    {
+                        GlobPattern = new GlobPattern("**/*.ch"),
                         Kind = WatchKind.Create | WatchKind.Change | WatchKind.Delete
                     }
                 )
