@@ -46,6 +46,7 @@ namespace XSharpLanguageServer.Handlers
     {
         private readonly XSharpDocumentService _documentService;
         private readonly XSharpDatabaseService _dbService;
+        private readonly XSharpWorkspaceIndex _workspaceIndex;
         private readonly ILogger<XSharpCompletionHandler> _logger;
 
         /// <summary>
@@ -59,10 +60,12 @@ namespace XSharpLanguageServer.Handlers
         public XSharpCompletionHandler(
             XSharpDocumentService documentService,
             XSharpDatabaseService dbService,
+            XSharpWorkspaceIndex workspaceIndex,
             ILogger<XSharpCompletionHandler> logger)
         {
             _documentService = documentService;
             _dbService       = dbService;
+            _workspaceIndex  = workspaceIndex;
             _logger          = logger;
         }
 
@@ -134,35 +137,43 @@ namespace XSharpLanguageServer.Handlers
                 }
 
                 // ----------------------------------------------------------------
-                // 3. DB cross-file symbols — types and global members by prefix.
+                // 3. Cross-file symbols — two-tier: workspace index then assembly DB.
                 //    Also check for member-access trigger ('.' or ':') to provide
                 //    member completion.
                 // ----------------------------------------------------------------
-                if (_dbService.IsAvailable)
-                {
-                    string? memberTypeName = GetMemberAccessType(
-                        request.TextDocument.Uri, request.Position);
+                string? memberTypeName = GetMemberAccessType(
+                    request.TextDocument.Uri, request.Position);
 
-                    if (memberTypeName != null)
+                if (memberTypeName != null)
+                {
+                    // Member access: foo. or foo: → workspace index only
+                    // (no ReferencedMembers table in the DB)
+                    foreach (var sym in _workspaceIndex.GetMembersOf(memberTypeName))
                     {
-                        // Member access: foo. or foo: → return members of the type
-                        var members = _dbService.GetMembersOf(memberTypeName);
-                        foreach (var sym in members)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            if (seen.Add(sym.Name))
-                                items.Add(DbSymbolToCompletionItem(sym));
-                        }
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (seen.Add(sym.Name))
+                            items.Add(SymbolToCompletionItem(sym));
                     }
-                    else if (prefix.Length >= 2)
+                }
+                else if (prefix.Length >= 2)
+                {
+                    // Prefix lookup — only activate for ≥2 chars to limit noise.
+                    // Tier 1: workspace index (source symbols).
+                    foreach (var sym in _workspaceIndex.FindByPrefix(prefix))
                     {
-                        // Prefix lookup — only activate for ≥2 chars to limit noise
-                        var dbSymbols = _dbService.FindByPrefix(prefix);
-                        foreach (var sym in dbSymbols)
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (seen.Add(sym.Name))
+                            items.Add(SymbolToCompletionItem(sym));
+                    }
+
+                    // Tier 2: assembly fallback.
+                    if (_dbService.IsAvailable)
+                    {
+                        foreach (var sym in _dbService.FindAssemblyByPrefix(prefix))
                         {
                             cancellationToken.ThrowIfCancellationRequested();
                             if (seen.Add(sym.Name))
-                                items.Add(DbSymbolToCompletionItem(sym));
+                                items.Add(SymbolToCompletionItem(sym));
                         }
                     }
                 }
@@ -422,11 +433,11 @@ namespace XSharpLanguageServer.Handlers
         }
 
         /// <summary>
-        /// Converts a <see cref="DbSymbol"/> into a <see cref="CompletionItem"/>.
-        /// The sort text is prefixed with <c>~</c> so DB items appear after
+        /// Converts a <see cref="Models.WorkspaceSymbol"/> into a <see cref="CompletionItem"/>.
+        /// The sort text is prefixed with <c>~</c> so cross-file items appear after
         /// keyword and in-file items.
         /// </summary>
-        private static CompletionItem DbSymbolToCompletionItem(DbSymbol sym)
+        private static CompletionItem SymbolToCompletionItem(Models.WorkspaceSymbol sym)
         {
             var kind = sym.Kind switch
             {

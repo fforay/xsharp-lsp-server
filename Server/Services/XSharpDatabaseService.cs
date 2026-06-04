@@ -235,11 +235,153 @@ namespace XSharpLanguageServer.Services
         // Queries
         // ====================================================================
 
+        // ====================================================================
+        // Assembly-only queries  (Tier-2 fallback for step-6 two-tier lookup)
+        // ====================================================================
+
+        /// <summary>
+        /// Returns assembly-level types and globals whose name starts with
+        /// <paramref name="prefix"/>. Queries <c>ReferencedTypes</c> and
+        /// <c>ReferencedGlobals</c> only — no project source tables.
+        /// </summary>
+        public IReadOnlyList<WorkspaceSymbol> FindAssemblyByPrefix(string prefix, int maxResults = 100)
+        {
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(prefix))
+                return Array.Empty<WorkspaceSymbol>();
+
+            var results = new List<WorkspaceSymbol>();
+            try
+            {
+                const string typeSql = @"
+                    SELECT rt.Name, rt.Kind, NULL AS ReturnType,
+                           NULL AS Sourcecode, NULL AS XmlComments,
+                           a.AssemblyFileName, 0, 0, NULL AS TypeName
+                    FROM   ReferencedTypes rt
+                    JOIN   Assemblies a ON a.Id = rt.idAssembly
+                    WHERE  rt.Name LIKE @prefix ESCAPE '\'
+                    LIMIT  @max";
+
+                using var typeCmd = new SqliteCommand(typeSql, conn);
+                typeCmd.Parameters.AddWithValue("@prefix", EscapeLike(prefix) + "%");
+                typeCmd.Parameters.AddWithValue("@max", maxResults);
+                ReadWorkspaceSymbols(typeCmd, results);
+
+                const string globalSql = @"
+                    SELECT rg.Name, rg.Kind, rg.ReturnType,
+                           rg.Sourcecode, NULL AS XmlComments,
+                           a.AssemblyFileName, 0, 0, NULL AS TypeName
+                    FROM   ReferencedGlobals rg
+                    JOIN   Assemblies a ON a.Id = rg.idAssembly
+                    WHERE  rg.Name LIKE @prefix ESCAPE '\'
+                    LIMIT  @max";
+
+                using var globalCmd = new SqliteCommand(globalSql, conn);
+                globalCmd.Parameters.AddWithValue("@prefix", EscapeLike(prefix) + "%");
+                globalCmd.Parameters.AddWithValue("@max", maxResults);
+                ReadWorkspaceSymbols(globalCmd, results);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "FindAssemblyByPrefix failed for '{Prefix}'", prefix);
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Looks up an assembly-level symbol by exact name.
+        /// Searches <c>ReferencedTypes</c> then <c>ReferencedGlobals</c>.
+        /// Returns <c>null</c> if not found or DB unavailable.
+        /// </summary>
+        public WorkspaceSymbol? FindAssemblyExact(string name)
+        {
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(name))
+                return null;
+
+            try
+            {
+                const string typeSql = @"
+                    SELECT rt.Name, rt.Kind, NULL AS ReturnType,
+                           NULL AS Sourcecode, NULL AS XmlComments,
+                           a.AssemblyFileName, 0, 0, NULL AS TypeName
+                    FROM   ReferencedTypes rt
+                    JOIN   Assemblies a ON a.Id = rt.idAssembly
+                    WHERE  rt.Name = @name COLLATE NOCASE
+                    LIMIT  1";
+
+                using var typeCmd = new SqliteCommand(typeSql, conn);
+                typeCmd.Parameters.AddWithValue("@name", name);
+                var typeResult = ReadSingleWorkspaceSymbol(typeCmd);
+                if (typeResult != null) return typeResult;
+
+                const string globalSql = @"
+                    SELECT rg.Name, rg.Kind, rg.ReturnType,
+                           rg.Sourcecode, NULL AS XmlComments,
+                           a.AssemblyFileName, 0, 0, NULL AS TypeName
+                    FROM   ReferencedGlobals rg
+                    JOIN   Assemblies a ON a.Id = rg.idAssembly
+                    WHERE  rg.Name = @name COLLATE NOCASE
+                    LIMIT  1";
+
+                using var globalCmd = new SqliteCommand(globalSql, conn);
+                globalCmd.Parameters.AddWithValue("@name", name);
+                return ReadSingleWorkspaceSymbol(globalCmd);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "FindAssemblyExact failed for '{Name}'", name);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Returns all overloads of a global function from referenced assemblies.
+        /// Queries <c>ReferencedGlobals</c> only.
+        /// </summary>
+        public IReadOnlyList<WorkspaceSymbol> FindAssemblyOverloads(string name)
+        {
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null || string.IsNullOrEmpty(name))
+                return Array.Empty<WorkspaceSymbol>();
+
+            var results = new List<WorkspaceSymbol>();
+            try
+            {
+                const string sql = @"
+                    SELECT rg.Name, rg.Kind, rg.ReturnType,
+                           rg.Sourcecode, NULL AS XmlComments,
+                           a.AssemblyFileName, 0, 0, NULL AS TypeName
+                    FROM   ReferencedGlobals rg
+                    JOIN   Assemblies a ON a.Id = rg.idAssembly
+                    WHERE  rg.Name = @name COLLATE NOCASE";
+
+                using var cmd = new SqliteCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@name", name);
+                ReadWorkspaceSymbols(cmd, results);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "FindAssemblyOverloads failed for '{Name}'", name);
+            }
+
+            return results;
+        }
+
+        // ====================================================================
+        // Project-tier queries  (obsolete — replaced by XSharpWorkspaceIndex)
+        // ====================================================================
+
         /// <summary>
         /// Returns all types and global members whose name starts with
         /// <paramref name="prefix"/> (case-insensitive).
         /// Used for cross-file completion.
         /// </summary>
+        [Obsolete("Use two-tier lookup: XSharpWorkspaceIndex.FindByPrefix then FindAssemblyByPrefix")]
         public IReadOnlyList<DbSymbol> FindByPrefix(string prefix, int maxResults = 100)
         {
             SqliteConnection? conn;
@@ -295,6 +437,7 @@ namespace XSharpLanguageServer.Services
         /// <paramref name="typeName"/> (case-insensitive).
         /// Used for member completion after <c>.</c> or <c>:</c>.
         /// </summary>
+        [Obsolete("Use XSharpWorkspaceIndex.GetMembersOf — no assembly-level member table exists in the DB")]
         public IReadOnlyList<DbSymbol> GetMembersOf(string typeName)
         {
             SqliteConnection? conn;
@@ -335,6 +478,7 @@ namespace XSharpLanguageServer.Services
         /// Returns the first match, preferring the current file when possible.
         /// Used for hover and go-to-definition.
         /// </summary>
+        [Obsolete("Use two-tier lookup: XSharpWorkspaceIndex.FindExact then FindAssemblyExact")]
         public DbSymbol? FindExact(string name, string? currentFile = null)
         {
             SqliteConnection? conn;
@@ -423,6 +567,7 @@ namespace XSharpLanguageServer.Services
         /// Returns all overloads of a function or method by exact name.
         /// Used for signature help — multiple overloads → multiple signatures.
         /// </summary>
+        [Obsolete("Use two-tier lookup: XSharpWorkspaceIndex.FindOverloads then FindAssemblyOverloads")]
         public IReadOnlyList<DbSymbol> FindOverloads(string name)
         {
             SqliteConnection? conn;
@@ -459,6 +604,7 @@ namespace XSharpLanguageServer.Services
         /// files — both types and members, all overloads.
         /// Used by find-references to seed the result list with declaration sites.
         /// </summary>
+        [Obsolete("Use XSharpWorkspaceIndex.FindAllByName — assembly symbols have no source locations")]
         public IReadOnlyList<DbSymbol> FindAllByName(string name)
         {
             SqliteConnection? conn;
@@ -551,6 +697,32 @@ namespace XSharpLanguageServer.Services
         // ====================================================================
         // Reader helpers
         // ====================================================================
+
+        private static void ReadWorkspaceSymbols(SqliteCommand cmd, List<WorkspaceSymbol> results)
+        {
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results.Add(ReadWorkspaceRow(reader));
+        }
+
+        private static WorkspaceSymbol? ReadSingleWorkspaceSymbol(SqliteCommand cmd)
+        {
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadWorkspaceRow(reader) : null;
+        }
+
+        private static WorkspaceSymbol ReadWorkspaceRow(SqliteDataReader r) => new WorkspaceSymbol
+        {
+            Name        = r.IsDBNull(0) ? string.Empty : r.GetString(0),
+            Kind        = r.IsDBNull(1) ? 0            : r.GetInt32(1),
+            ReturnType  = r.IsDBNull(2) ? null         : r.GetString(2),
+            Sourcecode  = r.IsDBNull(3) ? null         : r.GetString(3),
+            XmlComments = r.IsDBNull(4) ? null         : r.GetString(4),
+            FileName    = r.IsDBNull(5) ? string.Empty : r.GetString(5),
+            StartLine   = r.IsDBNull(6) ? 0            : r.GetInt32(6),
+            StartCol    = r.IsDBNull(7) ? 0            : r.GetInt32(7),
+            TypeName    = r.FieldCount > 8 && !r.IsDBNull(8) ? r.GetString(8) : null,
+        };
 
         private static void ReadSymbols(SqliteCommand cmd, List<DbSymbol> results)
         {

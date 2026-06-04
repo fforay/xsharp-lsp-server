@@ -34,6 +34,7 @@ namespace XSharpLanguageServer.Handlers
     {
         private readonly XSharpDocumentService           _documentService;
         private readonly XSharpDatabaseService           _databaseService;
+        private readonly XSharpWorkspaceIndex            _workspaceIndex;
         private readonly ILogger<XSharpInlayHintsHandler> _logger;
 
         // Matches a single parameter declaration inside a prototype string:
@@ -46,10 +47,12 @@ namespace XSharpLanguageServer.Handlers
         public XSharpInlayHintsHandler(
             XSharpDocumentService            documentService,
             XSharpDatabaseService            databaseService,
+            XSharpWorkspaceIndex             workspaceIndex,
             ILogger<XSharpInlayHintsHandler> logger)
         {
             _documentService = documentService;
             _databaseService = databaseService;
+            _workspaceIndex  = workspaceIndex;
             _logger          = logger;
         }
 
@@ -203,7 +206,13 @@ namespace XSharpLanguageServer.Handlers
         /// </summary>
         private List<string> GetParamNames(string funcName)
         {
-            var overloads = _databaseService.FindOverloads(funcName);
+            // Tier 1: workspace index (source symbols).
+            var overloads = _workspaceIndex.FindOverloads(funcName);
+
+            // Tier 2: assembly fallback.
+            if (overloads.Count == 0 && _databaseService.IsAvailable)
+                overloads = _databaseService.FindAssemblyOverloads(funcName);
+
             foreach (var sym in overloads)
             {
                 var names = ParseParamNames(sym.Sourcecode);

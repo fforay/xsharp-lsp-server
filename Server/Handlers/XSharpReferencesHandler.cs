@@ -31,15 +31,18 @@ namespace XSharpLanguageServer.Handlers
     {
         private readonly XSharpDocumentService             _documentService;
         private readonly XSharpDatabaseService             _dbService;
+        private readonly XSharpWorkspaceIndex              _workspaceIndex;
         private readonly ILogger<XSharpReferencesHandler> _logger;
 
         public XSharpReferencesHandler(
             XSharpDocumentService              documentService,
             XSharpDatabaseService              dbService,
+            XSharpWorkspaceIndex               workspaceIndex,
             ILogger<XSharpReferencesHandler>   logger)
         {
             _documentService = documentService;
             _dbService       = dbService;
+            _workspaceIndex  = workspaceIndex;
             _logger          = logger;
         }
 
@@ -82,10 +85,11 @@ namespace XSharpLanguageServer.Handlers
                     });
                 }
 
-                // DB declaration sites when client requests them.
-                if (request.Context?.IncludeDeclaration == true && _dbService.IsAvailable)
+                // Workspace index declaration sites when client requests them.
+                // (Assembly symbols have no meaningful source locations — index only.)
+                if (request.Context?.IncludeDeclaration == true)
                 {
-                    foreach (var decl in _dbService.FindAllByName(word))
+                    foreach (var decl in _workspaceIndex.FindAllByName(word))
                     {
                         if (string.IsNullOrEmpty(decl.FileName)) continue;
                         var declUri = DocumentUri.FromFileSystemPath(decl.FileName);

@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using XSharpLanguageServer.Services;
+using XSharpLanguageServer.Models;
 namespace XSharpLanguageServer.Handlers
 {
     /// <summary>
@@ -28,16 +29,19 @@ namespace XSharpLanguageServer.Handlers
     {
         private readonly XSharpDocumentService          _documentService;
         private readonly XSharpDatabaseService          _dbService;
+        private readonly XSharpWorkspaceIndex           _workspaceIndex;
         private readonly ILogger<XSharpGoToDefinitionHandler> _logger;
 
         /// <summary>Initialises the handler. Called by the DI container.</summary>
         public XSharpGoToDefinitionHandler(
             XSharpDocumentService                 documentService,
             XSharpDatabaseService                 dbService,
+            XSharpWorkspaceIndex                  workspaceIndex,
             ILogger<XSharpGoToDefinitionHandler>  logger)
         {
             _documentService = documentService;
             _dbService       = dbService;
+            _workspaceIndex  = workspaceIndex;
             _logger          = logger;
         }
 
@@ -57,9 +61,6 @@ namespace XSharpLanguageServer.Handlers
         {
             try
             {
-                if (!_dbService.IsAvailable)
-                    return Task.FromResult<LocationOrLocationLinks?>(null);
-
                 var uri  = request.TextDocument.Uri;
                 var pos  = request.Position;
 
@@ -72,7 +73,11 @@ namespace XSharpLanguageServer.Handlers
                     return Task.FromResult<LocationOrLocationLinks?>(null);
 
                 string? filePath = uri.GetFileSystemPath();
-                var symbol = _dbService.FindExact(word, filePath);
+
+                // Tier 1: workspace index (source symbols — always available).
+                var symbol = _workspaceIndex.FindExact(word, filePath)
+                          // Tier 2: assembly fallback.
+                          ?? (_dbService.IsAvailable ? _dbService.FindAssemblyExact(word) : null);
 
                 if (symbol == null || string.IsNullOrEmpty(symbol.FileName))
                     return Task.FromResult<LocationOrLocationLinks?>(null);

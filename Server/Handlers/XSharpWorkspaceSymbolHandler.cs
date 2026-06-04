@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using XSharpLanguageServer.Services;
+using IndexSymbol = XSharpLanguageServer.Models.WorkspaceSymbol;
 
 namespace XSharpLanguageServer.Handlers
 {
@@ -33,16 +34,19 @@ namespace XSharpLanguageServer.Handlers
     public class XSharpWorkspaceSymbolHandler : WorkspaceSymbolsHandlerBase
     {
         private readonly XSharpDatabaseService                   _dbService;
+        private readonly XSharpWorkspaceIndex                    _workspaceIndex;
         private readonly ILogger<XSharpWorkspaceSymbolHandler>   _logger;
 
         private const int MaxResults = 50;
 
         public XSharpWorkspaceSymbolHandler(
             XSharpDatabaseService                   dbService,
+            XSharpWorkspaceIndex                    workspaceIndex,
             ILogger<XSharpWorkspaceSymbolHandler>   logger)
         {
-            _dbService = dbService;
-            _logger    = logger;
+            _dbService      = dbService;
+            _workspaceIndex = workspaceIndex;
+            _logger         = logger;
         }
 
         /// <inheritdoc/>
@@ -60,19 +64,23 @@ namespace XSharpLanguageServer.Handlers
             {
                 string query = request.Query?.Trim() ?? string.Empty;
 
-                if (!_dbService.IsAvailable || query.Length == 0)
+                if (query.Length == 0)
                     return Task.FromResult<Container<WorkspaceSymbol>?>(null);
 
                 _logger.LogInformation("WorkspaceSymbol: query='{Query}'", query);
 
-                var dbSymbols = _dbService.FindByPrefix(query, MaxResults);
-                if (dbSymbols.Count == 0)
-                    return Task.FromResult<Container<WorkspaceSymbol>?>(null);
-
-                var results = new List<WorkspaceSymbol>(dbSymbols.Count);
+                var results = new List<WorkspaceSymbol>(MaxResults);
                 var seen    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                foreach (var sym in dbSymbols)
+                // Tier 1: workspace index (source symbols — always available).
+                IReadOnlyList<IndexSymbol> indexSymbols = _workspaceIndex.FindByPrefix(query, MaxResults);
+
+                // Tier 2: assembly fallback.
+                IReadOnlyList<IndexSymbol> asmSymbols = _dbService.IsAvailable
+                    ? _dbService.FindAssemblyByPrefix(query, MaxResults)
+                    : Array.Empty<IndexSymbol>();
+
+                foreach (var sym in System.Linq.Enumerable.Concat(indexSymbols, asmSymbols))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 

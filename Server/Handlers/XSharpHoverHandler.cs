@@ -180,16 +180,19 @@ namespace XSharpLanguageServer.Handlers
         };
         private readonly XSharpDocumentService    _documentService;
         private readonly XSharpDatabaseService    _dbService;
+        private readonly XSharpWorkspaceIndex     _workspaceIndex;
         private readonly ILogger<XSharpHoverHandler> _logger;
 
         /// <summary>Initialises the handler. Called by the DI container.</summary>
         public XSharpHoverHandler(
             XSharpDocumentService       documentService,
             XSharpDatabaseService       dbService,
+            XSharpWorkspaceIndex        workspaceIndex,
             ILogger<XSharpHoverHandler> logger)
         {
             _documentService = documentService;
             _dbService       = dbService;
+            _workspaceIndex  = workspaceIndex;
             _logger          = logger;
         }
 
@@ -241,18 +244,22 @@ namespace XSharpLanguageServer.Handlers
                 }
 
                 // ----------------------------------------------------------
-                // 2. IntelliSense database — user-defined and assembly symbols.
+                // 2. Two-tier symbol lookup: workspace index then assembly DB.
                 // ----------------------------------------------------------
-                if (!_dbService.IsAvailable)
+                string? filePath = uri.GetFileSystemPath();
+
+                // Tier 1: workspace index (source symbols — always available).
+                Models.WorkspaceSymbol? symbol = _workspaceIndex.FindExact(word, filePath);
+
+                // Tier 2: assembly fallback.
+                if (symbol == null && _dbService.IsAvailable)
+                    symbol = _dbService.FindAssemblyExact(word);
+
+                if (symbol == null)
                 {
-                    _logger.LogDebug("Hover: DB not available, no result for '{Word}'", word);
+                    _logger.LogDebug("Hover: no symbol found for '{Word}'", word);
                     return Task.FromResult<Hover?>(null);
                 }
-
-                string? filePath = uri.GetFileSystemPath();
-                var symbol = _dbService.FindExact(word, filePath);
-                if (symbol == null)
-                    return Task.FromResult<Hover?>(null);
 
                 return Task.FromResult<Hover?>(new Hover
                 {
@@ -308,8 +315,8 @@ namespace XSharpLanguageServer.Handlers
         private static bool IsIdentChar(char c)
             => char.IsLetterOrDigit(c) || c == '_';
 
-        /// <summary>Builds a Markdown hover card from a <see cref="DbSymbol"/>.</summary>
-        private static string BuildMarkdown(DbSymbol symbol)
+        /// <summary>Builds a Markdown hover card from a <see cref="Models.WorkspaceSymbol"/>.</summary>
+        private static string BuildMarkdown(Models.WorkspaceSymbol symbol)
         {
             var sb = new StringBuilder();
 

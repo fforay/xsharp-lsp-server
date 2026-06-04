@@ -31,16 +31,19 @@ namespace XSharpLanguageServer.Handlers
     {
         private readonly XSharpDocumentService              _documentService;
         private readonly XSharpDatabaseService              _dbService;
+        private readonly XSharpWorkspaceIndex               _workspaceIndex;
         private readonly ILogger<XSharpSignatureHelpHandler> _logger;
 
         /// <summary>Initialises the handler. Called by the DI container.</summary>
         public XSharpSignatureHelpHandler(
             XSharpDocumentService                  documentService,
             XSharpDatabaseService                  dbService,
+            XSharpWorkspaceIndex                   workspaceIndex,
             ILogger<XSharpSignatureHelpHandler>    logger)
         {
             _documentService = documentService;
             _dbService       = dbService;
+            _workspaceIndex  = workspaceIndex;
             _logger          = logger;
         }
 
@@ -62,9 +65,6 @@ namespace XSharpLanguageServer.Handlers
         {
             try
             {
-                if (!_dbService.IsAvailable)
-                    return Task.FromResult<SignatureHelp?>(null);
-
                 var uri  = request.TextDocument.Uri;
                 var pos  = request.Position;
 
@@ -75,7 +75,13 @@ namespace XSharpLanguageServer.Handlers
                 if (!TryExtractCallContext(text, pos, out string funcName, out int activeParam))
                     return Task.FromResult<SignatureHelp?>(null);
 
-                var overloads = _dbService.FindOverloads(funcName);
+                // Tier 1: workspace index (source symbols).
+                var overloads = _workspaceIndex.FindOverloads(funcName);
+
+                // Tier 2: assembly fallback.
+                if (overloads.Count == 0 && _dbService.IsAvailable)
+                    overloads = _dbService.FindAssemblyOverloads(funcName);
+
                 if (overloads.Count == 0)
                     return Task.FromResult<SignatureHelp?>(null);
 
