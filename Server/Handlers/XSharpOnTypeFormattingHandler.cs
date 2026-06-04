@@ -1,0 +1,279 @@
+using MediatR;
+using Microsoft.Extensions.Logging;
+using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
+using OmniSharp.Extensions.LanguageServer.Protocol.Document;
+using OmniSharp.Extensions.LanguageServer.Protocol.Models;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using XSharpLanguageServer.Services;
+
+namespace XSharpLanguageServer.Handlers
+{
+    /// <summary>
+    /// Handles the <c>textDocument/onTypeFormatting</c> LSP request.
+    /// <para>
+    /// Triggered when the user presses Enter.  If the line that was just
+    /// completed is a block-closing keyword (<c>ENDIF</c>, <c>ENDDO</c>,
+    /// <c>NEXT</c>, <c>ELSE</c>, <c>ELSEIF</c>, <c>END</c>, <c>ENDCASE</c>,
+    /// <c>ENDTRY</c>, <c>CATCH</c>, <c>FINALLY</c>, <c>ENDWITH</c>) the
+    /// handler scans upward tracking nesting depth to find the matching opener
+    /// and emits a single <see cref="TextEdit"/> that corrects the closing
+    /// keyword's leading whitespace to align with its opener.
+    /// </para>
+    /// </summary>
+    public class XSharpOnTypeFormattingHandler : DocumentOnTypeFormattingHandlerBase
+    {
+        private readonly XSharpDocumentService _documentService;
+        private readonly ILogger<XSharpOnTypeFormattingHandler> _logger;
+
+        // ── Keyword specs ────────────────────────────────────────────────────
+        // Each entry: closing keyword → (openers, same-closers)
+        // "openers"      = keywords that START the matching block
+        // "same-closers" = keywords that END the same block type (used to
+        //                  track nesting depth when scanning upward)
+        private static readonly Dictionary<string, ClosingSpec> _specs =
+            new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["ENDIF"]   = new(["IF"],                     ["ENDIF"]),
+            ["ENDDO"]   = new(["DO WHILE", "DO"],         ["ENDDO"]),
+            ["NEXT"]    = new(["FOR", "FOREACH"],         ["NEXT"]),
+            ["ELSE"]    = new(["IF", "ELSEIF"],           ["ENDIF"]),
+            ["ELSEIF"]  = new(["IF", "ELSEIF"],           ["ENDIF"]),
+            ["ENDCASE"] = new(["DO CASE", "SWITCH"],      ["ENDCASE"]),
+            ["ENDTRY"]  = new(["TRY"],                    ["ENDTRY"]),
+            ["CATCH"]   = new(["TRY"],                    ["ENDTRY"]),
+            ["FINALLY"] = new(["TRY"],                    ["ENDTRY"]),
+            ["ENDWITH"] = new(["WITH"],                   ["ENDWITH"]),
+        };
+
+        // Generic block openers/closers for the bare "END" keyword.
+        private static readonly string[] GenericOpeners =
+        [
+            "CLASS", "NAMESPACE", "STRUCTURE", "INTERFACE", "ENUM",
+            "BEGIN", "DEFINE",
+        ];
+        private static readonly string[] GenericClosers =
+        [
+            "END", "ENDCLASS", "ENDNAMESPACE", "ENDSTRUCTURE", "ENDINTERFACE",
+        ];
+
+        public XSharpOnTypeFormattingHandler(
+            XSharpDocumentService documentService,
+            ILogger<XSharpOnTypeFormattingHandler> logger)
+        {
+            _documentService = documentService;
+            _logger          = logger;
+        }
+
+        /// <inheritdoc/>
+        protected override DocumentOnTypeFormattingRegistrationOptions CreateRegistrationOptions(
+            DocumentOnTypeFormattingCapability capability,
+            ClientCapabilities clientCapabilities)
+            => new DocumentOnTypeFormattingRegistrationOptions
+            {
+                DocumentSelector      = TextDocumentSelector.ForLanguage("xsharp"),
+                FirstTriggerCharacter = "\n",
+            };
+
+        /// <inheritdoc/>
+        public override Task<TextEditContainer?> Handle(
+            DocumentOnTypeFormattingParams request,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var uri = request.TextDocument.Uri;
+                if (!_documentService.TryGetText(uri, out var text))
+                    return Task.FromResult<TextEditContainer?>(null);
+
+                // The newline was just inserted, so position.Line is the NEW
+                // empty line; the completed line is one above.
+                int completedLine = (int)request.Position.Line - 1;
+                if (completedLine < 0)
+                    return Task.FromResult<TextEditContainer?>(null);
+
+                var lines = text.Split('\n');
+                if (completedLine >= lines.Length)
+                    return Task.FromResult<TextEditContainer?>(null);
+
+                string line    = lines[completedLine].TrimEnd('\r');
+                string trimmed = line.TrimStart();
+                string keyword = FirstKeyword(trimmed);
+
+                if (string.IsNullOrEmpty(keyword))
+                    return Task.FromResult<TextEditContainer?>(null);
+
+                // Find the indent the closing keyword should use.
+                string? openerIndent = null;
+
+                if (_specs.TryGetValue(keyword, out var spec))
+                {
+                    openerIndent = FindOpenerIndent(lines, completedLine - 1, spec);
+                }
+                else if (string.Equals(keyword, "END", StringComparison.OrdinalIgnoreCase))
+                {
+                    openerIndent = FindGenericEndOpenerIndent(lines, completedLine - 1);
+                }
+
+                if (openerIndent == null)
+                    return Task.FromResult<TextEditContainer?>(null);
+
+                // Current leading whitespace of the closing keyword line.
+                string currentIndent = line[..(line.Length - trimmed.Length)];
+                if (currentIndent == openerIndent)
+                    return Task.FromResult<TextEditContainer?>(null); // already aligned
+
+                _logger.LogDebug(
+                    "OnTypeFormatting: re-indenting '{Keyword}' at line {Line}",
+                    keyword, completedLine);
+
+                var edit = new TextEdit
+                {
+                    Range = new OmniSharp.Extensions.LanguageServer.Protocol.Models.Range(
+                        new Position(completedLine, 0),
+                        new Position(completedLine, currentIndent.Length)),
+                    NewText = openerIndent,
+                };
+
+                return Task.FromResult<TextEditContainer?>(new TextEditContainer(edit));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "OnTypeFormatting failed for {Uri}", request.TextDocument.Uri);
+                return Task.FromResult<TextEditContainer?>(null);
+            }
+        }
+
+        // ====================================================================
+        // Upward scan helpers
+        // ====================================================================
+
+        /// <summary>
+        /// Scans upward from <paramref name="startLine"/>, tracking nesting
+        /// depth, and returns the leading whitespace of the matching opener line.
+        /// </summary>
+        private static string? FindOpenerIndent(string[] lines, int startLine, ClosingSpec spec)
+        {
+            int depth = 0;
+
+            for (int i = startLine; i >= 0; i--)
+            {
+                string trimmed = lines[i].TrimEnd('\r').TrimStart();
+
+                // Same-type closer encountered while scanning upward → deeper nesting.
+                foreach (var closer in spec.SameClosers)
+                {
+                    if (LineStartsWith(trimmed, closer))
+                    {
+                        depth++;
+                        goto nextLine;
+                    }
+                }
+
+                // Opener encountered.
+                foreach (var opener in spec.Openers)
+                {
+                    if (LineStartsWith(trimmed, opener))
+                    {
+                        if (depth == 0)
+                        {
+                            string raw = lines[i].TrimEnd('\r');
+                            return raw[..(raw.Length - trimmed.Length)];
+                        }
+                        depth--;
+                        goto nextLine;
+                    }
+                }
+
+                nextLine:;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Handles the bare <c>END</c> keyword by scanning upward for any
+        /// generic block opener (<c>CLASS</c>, <c>NAMESPACE</c>, <c>BEGIN</c>,
+        /// etc.) while correctly tracking depth via generic closers.
+        /// </summary>
+        private static string? FindGenericEndOpenerIndent(string[] lines, int startLine)
+        {
+            int depth = 0;
+
+            for (int i = startLine; i >= 0; i--)
+            {
+                string trimmed = lines[i].TrimEnd('\r').TrimStart();
+                string kw      = FirstKeyword(trimmed);
+
+                foreach (var closer in GenericClosers)
+                {
+                    if (string.Equals(kw, closer, StringComparison.OrdinalIgnoreCase))
+                    {
+                        depth++;
+                        goto nextLine;
+                    }
+                }
+
+                foreach (var opener in GenericOpeners)
+                {
+                    if (LineStartsWith(trimmed, opener))
+                    {
+                        if (depth == 0)
+                        {
+                            string raw = lines[i].TrimEnd('\r');
+                            return raw[..(raw.Length - trimmed.Length)];
+                        }
+                        depth--;
+                        goto nextLine;
+                    }
+                }
+
+                nextLine:;
+            }
+
+            return null;
+        }
+
+        // ====================================================================
+        // Utilities
+        // ====================================================================
+
+        /// <summary>
+        /// Returns the first contiguous identifier word from
+        /// <paramref name="trimmedLine"/> (letters, digits, underscore only).
+        /// </summary>
+        private static string FirstKeyword(string trimmedLine)
+        {
+            int i = 0;
+            while (i < trimmedLine.Length
+                   && (char.IsLetterOrDigit(trimmedLine[i]) || trimmedLine[i] == '_'))
+                i++;
+            return trimmedLine[..i];
+        }
+
+        /// <summary>
+        /// Returns <c>true</c> when <paramref name="trimmedLine"/> starts with
+        /// <paramref name="keyword"/> (case-insensitive) followed by whitespace,
+        /// end-of-string, or a non-identifier character.  Supports multi-word
+        /// keywords such as <c>"DO CASE"</c> and <c>"DO WHILE"</c>.
+        /// </summary>
+        private static bool LineStartsWith(string trimmedLine, string keyword)
+        {
+            if (!trimmedLine.StartsWith(keyword, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (trimmedLine.Length == keyword.Length) return true;
+
+            char next = trimmedLine[keyword.Length];
+            return !char.IsLetterOrDigit(next) && next != '_';
+        }
+
+        // ====================================================================
+        // Inner types
+        // ====================================================================
+
+        private sealed record ClosingSpec(string[] Openers, string[] SameClosers);
+    }
+}

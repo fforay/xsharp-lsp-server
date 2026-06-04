@@ -140,6 +140,8 @@ namespace XSharpLanguageServer
                      .WithHandler<XSharpDidChangeWatchedFilesHandler>()
                      // Selection range: smart expand/shrink selection (Alt+Shift+→)
                      .WithHandler<XSharpSelectionRangeHandler>()
+                     // On-type formatting: auto-indent closing keywords on Enter
+                     .WithHandler<XSharpOnTypeFormattingHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
