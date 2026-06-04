@@ -136,6 +136,8 @@ namespace XSharpLanguageServer
                      .WithHandler<XSharpCodeLensHandler>()
                      // Inlay hints: parameter name annotations at call sites
                      .WithHandler<XSharpInlayHintsHandler>()
+                     // Watched files: re-index or remove files changed outside the editor
+                     .WithHandler<XSharpDidChangeWatchedFilesHandler>()
                     // Connect the DB service once the workspace root is known from the LSP
                     // initialize request (rootUri preferred, rootPath as fallback).
                     .OnInitialized((server, request, result, ct) =>
