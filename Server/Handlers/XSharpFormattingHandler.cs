@@ -286,11 +286,15 @@ namespace XSharpLanguageServer.Handlers
             foreach (var k in byLine.Keys)
                 if (k > maxLine) maxLine = k;
 
-            var sb             = new StringBuilder(originalText.Length);
-            int indentLevel    = 0;
-            bool inMember      = false;  // true once a code-block header has been seen
-            bool memberBodyOpen = false; // true only when indentLevel was incremented for that member
-            string nl          = hasCr ? "\r\n" : "\n";
+            var sb              = new StringBuilder(originalText.Length);
+            int  indentLevel    = 0;
+            bool inMember       = false;  // true once a code-block header has been seen
+            bool memberBodyOpen = false;  // true when indentLevel was incremented for that member
+            bool typeBodyOpen   = false;  // true when CLASS/STRUCTURE/INTERFACE added an indent level
+            bool caseContainerOpen = false; // true after DO CASE/SWITCH opened, before first CASE
+            bool caseBodyOpen   = false;  // true when a CASE/OTHERWISE branch opened a body level
+            int  continuationExtra = 0;   // extra indent for multi-line continuation (;)
+            string nl           = hasCr ? "\r\n" : "\n";
 
             var origLines = originalText.Split('\n');
 
@@ -323,6 +327,12 @@ namespace XSharpLanguageServer.Handlers
                 bool isTypeCloser       = firstReal != null && IsTypeCloser(firstReal, lineTokens, settings.IndentNamespace);
                 bool isCaseBranch       = firstReal != null &&
                                           (firstReal.Type == XSharpLexer.CASE || firstReal.Type == XSharpLexer.OTHERWISE);
+                bool isEndCase          = firstReal != null && firstReal.Type == XSharpLexer.ENDCASE;
+                // DO CASE (DO followed by CASE) or SWITCH — open the case container.
+                bool isDoCaseOrSwitch   = firstReal != null &&
+                                          (firstReal.Type == XSharpLexer.SWITCH ||
+                                           (firstReal.Type == XSharpLexer.DO &&
+                                            GetNextRealType(firstReal, lineTokens) == XSharpLexer.CASE));
                 bool isEndMember        = !isTypeCloser && firstReal != null && IsEndMember(firstReal, lineTokens);
                 bool isSubBlockEnd      = !isTypeCloser && !isEndMember
                                           && firstReal != null && IsSubBlockEnd(firstReal, lineTokens);
@@ -341,7 +351,8 @@ namespace XSharpLanguageServer.Handlers
                     // Close the open member body (if any), then close the type.
                     if (inMember && memberBodyOpen) indentLevel = Math.Max(0, indentLevel - 1);
                     inMember = false; memberBodyOpen = false;
-                    indentLevel = Math.Max(0, indentLevel - 1);
+                    // Only close the type level if it was actually opened.
+                    if (typeBodyOpen) { indentLevel = Math.Max(0, indentLevel - 1); typeBodyOpen = false; }
                 }
                 else if (isTypeOpener && inMember)
                 {
@@ -363,21 +374,58 @@ namespace XSharpLanguageServer.Handlers
                 {
                     indentLevel = Math.Max(0, indentLevel - 1);
                 }
+                else if (isEndCase)
+                {
+                    // Close the last case body (if one was opened) and the DO container (if still open).
+                    if (caseBodyOpen)      { indentLevel = Math.Max(0, indentLevel - 1); caseBodyOpen      = false; }
+                    if (caseContainerOpen) { indentLevel = Math.Max(0, indentLevel - 1); caseContainerOpen = false; }
+                    // ENDCASE is fully handled here — skip the generic _indentClose below.
+                }
+                else if (isCaseBranch)
+                {
+                    if (!settings.IndentCaseLabel)
+                    {
+                        // CASE/OTHERWISE should align with DO CASE/SWITCH opener.
+                        // Close either the DO container (first CASE) or the previous case body.
+                        if (caseBodyOpen)      { indentLevel = Math.Max(0, indentLevel - 1); caseBodyOpen      = false; }
+                        else if (caseContainerOpen) { indentLevel = Math.Max(0, indentLevel - 1); caseContainerOpen = false; }
+                    }
+                    else if (caseBodyOpen)
+                    {
+                        // IndentCaseLabel=true: close the previous case body before opening a new one.
+                        indentLevel = Math.Max(0, indentLevel - 1);
+                        caseBodyOpen = false;
+                    }
+                    // CASE is fully handled here — skip generic _indentClose below.
+                }
                 else if (firstReal != null && _indentClose.Contains(firstReal.Type))
                 {
-                    // CASE / OTHERWISE: only close-before-write when IndentCaseLabel = false
-                    // (they should align with DO CASE / SWITCH, not sit inside it).
-                    if (!isCaseBranch || !settings.IndentCaseLabel)
-                        indentLevel = Math.Max(0, indentLevel - 1);
+                    indentLevel = Math.Max(0, indentLevel - 1);
                 }
 
                 // ---- Write line ----
                 string lineContent = RebuildLine(origLine, lineTokens, settings.KeywordCase);
-                string indent      = BuildIndent(indentLevel, indentUnit);
+                string indent      = BuildIndent(indentLevel + continuationExtra, indentUnit);
                 string fullLine    = indent + lineContent.TrimStart();
                 if (settings.TrimTrailingWhitespace)
                     fullLine = fullLine.TrimEnd();
                 sb.Append(fullLine);
+
+                // Update continuation indent for the NEXT line.
+                // A line whose last real token is SEMI (;) continues on the next line.
+                if (settings.IndentMultiLines)
+                {
+                    bool endsWithSemi = false;
+                    for (int i = lineTokens.Count - 1; i >= 0; i--)
+                    {
+                        var tok = lineTokens[i];
+                        if (tok.Channel != 0 || tok.Type == -1) continue;
+                        if (XSharpLexer.IsComment(tok.Type)) continue;
+                        endsWithSemi = tok.Type == XSharpLexer.SEMI;
+                        break;
+                    }
+                    continuationExtra = endsWithSemi ? 1 : 0;
+                }
 
                 if (ln < maxLine) sb.Append(nl);
 
@@ -388,15 +436,36 @@ namespace XSharpLanguageServer.Handlers
                     if (!isSingleLineMember) { indentLevel++; memberBodyOpen = true; }
                     else memberBodyOpen = false;
                 }
-                else if (!isTypeCloser && !isEndMember && !isSubBlockEnd && !isGenericEnd
-                         && firstReal != null && _indentOpen.Contains(firstReal.Type))
+                else if (isCaseBranch)
                 {
-                    // CASE / OTHERWISE: only open-after-write when IndentCaseLabel = false
-                    // (body is indented relative to the DO CASE level, not an extra level).
-                    if (!isCaseBranch || !settings.IndentCaseLabel)
+                    // Case branch handled independently of the generic _indentOpen path.
+                    if (settings.IndentCaseContent)
                     {
                         indentLevel++;
-                        if (isTypeOpener) { inMember = false; memberBodyOpen = false; }
+                        caseBodyOpen = true;
+                    }
+                    // If !IndentCaseContent: no body level opened, caseBodyOpen stays false.
+                }
+                else if (!isTypeCloser && !isEndMember && !isSubBlockEnd && !isGenericEnd
+                         && !isEndCase
+                         && firstReal != null && _indentOpen.Contains(firstReal.Type))
+                {
+                    if (isTypeOpener)
+                    {
+                        // CLASS/INTERFACE/STRUCTURE: gate on IndentEntityContent / IndentFieldContent.
+                        bool openTypeBody = settings.IndentEntityContent || settings.IndentFieldContent;
+                        if (openTypeBody) { indentLevel++; typeBodyOpen = true; }
+                        inMember = false; memberBodyOpen = false;
+                    }
+                    else if (isDoCaseOrSwitch)
+                    {
+                        // DO CASE / SWITCH: open the case container and mark it.
+                        indentLevel++;
+                        caseContainerOpen = true;
+                    }
+                    else
+                    {
+                        indentLevel++;
                     }
                 }
             }
