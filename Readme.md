@@ -12,27 +12,32 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 
 - **Semantic syntax highlighting** — tokens classified into: keyword, type, modifier, macro (preprocessor directives), comment, string, number, operator, variable
 - **Diagnostics** — syntax errors and warnings from the XSharp parser are pushed to the editor as squiggly underlines (`textDocument/publishDiagnostics`)
+- **Semantic diagnostics** — optional lightweight semantic analysis pass that publishes extra diagnostics (wrong argument count, unknown calls); controlled by `xsharp.semanticDiagnostics` and `xsharp.warnOnUndefinedCalls` workspace settings
 - **Document synchronization** — full incremental sync (open / change / save / close) with correct `\r\n` and `\n` line ending handling (`textDocument/didOpen`, `didChange`, `didSave`, `didClose`)
+- **File-system watch** — new and deleted source files trigger automatic index updates (`workspace/didChangeWatchedFiles`); `.prg`, `.prgx`, and `.ch` files are watched
 - **Document symbols** — hierarchical outline of all declared entities (namespaces, classes, interfaces, structs, enums, functions, methods, properties, events, fields, …) for the outline panel and `Ctrl+Shift+O` navigation (`textDocument/documentSymbol`)
 - **Folding ranges** — collapse type declarations, member declarations, control-flow blocks (`IF`, `FOR`, `FOREACH`, `WHILE`, `REPEAT`, `DO`/`DO WHILE`/`DO CASE`, `SWITCH`, `TRY`, `WITH`), `#region`/`#endregion` pairs, and multi-line comments (`textDocument/foldingRange`)
-- **Completion** — keywords (from lexer vocabulary) + document symbols from the current file + cross-file type/member lookup from the IntelliSense database, filtered by typed prefix; member completion after `.` and `:` (`textDocument/completion`)
-- **Hover** — prototype and XML doc comments for the symbol under the cursor, sourced from the IntelliSense database (`textDocument/hover`)
-- **Go to definition** — jumps to the file and line where a symbol is declared, sourced from the IntelliSense database (`textDocument/definition`)
-- **Signature help** — parameter hints for all overloads of a function call, sourced from the IntelliSense database (`textDocument/signatureHelp`)
-- **Configurable dialect and include paths** — dialect (Core, VO, Vulcan, Harbour, …), include paths, and preprocessor symbols read from `workspace/didChangeConfiguration`; changes trigger a full reparse (`workspace/didChangeConfiguration`)
-- **Find references** — locates all usages of the identifier under the cursor across all currently open documents; declaration sites also returned from the IntelliSense database when requested (`textDocument/references`)
-- **Rename symbol** — renames every occurrence of the identifier under the cursor across all currently open documents; returns a `WorkspaceEdit` for atomic client-side apply (`textDocument/rename`)
-- **Document formatting** — uppercases all XSharp keywords to their canonical spelling and normalises indentation; handles sequential member declarations, single-line and multi-line PROPERTY forms, GET/SET accessor blocks, and all `END` / `END X` terminator variants; uses client-supplied tab size / insert-spaces options; keyword map built automatically from `XSharpLexer` reflection (`textDocument/formatting`)
-- **Auto-reconnect to IntelliSense database** — a `FileSystemWatcher` monitors the `.vs/` subtree for `X#Model.xsdb` Created/Changed events and reconnects automatically when VS flushes a new copy of the database (typically every ~5 minutes) or when the file first appears after server startup
+- **Selection range** — smart expand / shrink selection following XSharp block structure (Alt+Shift+→ in VS Code) (`textDocument/selectionRange`)
+- **Completion** — keywords + document symbols + cross-file workspace index lookup; DB queried as assembly-only fallback; member completion after `.` and `:` with local type inference (`textDocument/completion`)
+- **Hover** — prototype and XML doc comments for the symbol under the cursor; workspace index queried first, IntelliSense database as fallback (`textDocument/hover`)
+- **Go to definition** — jumps to the declaration in workspace source files or, for assembly symbols, to the DB entry (`textDocument/definition`)
+- **Signature help** — parameter hints for all overloads of a function call (`textDocument/signatureHelp`)
+- **Find references** — locates all usages across the entire project via the workspace token index (not limited to open documents); declaration sites also returned when requested (`textDocument/references`)
+- **Rename symbol** — renames every occurrence across all project files (open and closed) via the workspace index; `textDocument/prepareRename` validates the target before prompting (`textDocument/rename`)
+- **Document formatting** — uppercases all XSharp keywords to their canonical spelling and normalises indentation; handles sequential member declarations, single-line and multi-line PROPERTY forms, GET/SET accessor blocks, `DO CASE`/`SWITCH` two-level container/body model, multi-line continuation (`;`), and all `END` / `END X` terminator variants; uses client-supplied tab size / insert-spaces options; keyword map built automatically from `XSharpLexer` reflection (`textDocument/formatting`)
+- **On-type formatting** — auto-indents the current line as structural keywords are completed (`textDocument/onTypeFormatting`)
+- **Formatting settings** — full set of indentation and keyword-casing options exposed as VS Code workspace settings: `IndentCaseLabel`, `IndentCaseContent`, `IndentBlockContent`, `IndentEntityContent`, `IndentFieldContent`, `IndentNamespace`, `IndentMultiLines`, `KeywordCase`, `TrimTrailingWhitespace`, `InsertFinalNewline`
+- **Code lens** — reference counts displayed above every declaration (`textDocument/codeLens`)
+- **Inlay hints** — parameter name annotations at call sites (`textDocument/inlayHint`)
+- **Workspace symbols** — symbol search across all project source files (`workspace/symbol`)
+- **Call hierarchy** — navigate callers and callees of any function or method; uses the workspace index for full-project search (`callHierarchy/prepare`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`)
+- **Code actions** — *Add USING*: inserts a missing `USING` directive; *Fix keyword casing*: corrects keyword case to match the configured `KeywordCase` setting (`textDocument/codeAction`)
+- **Configurable dialect, include paths, and preprocessor symbols** — read from `workspace/didChangeConfiguration`; changes trigger a full reparse
+- **Auto-reconnect to IntelliSense database** — a `FileSystemWatcher` monitors the `.vs/` subtree for `X#Model.xsdb` Created/Changed events and reconnects automatically when VS flushes a new copy or when the file first appears after startup
 
 ### Planned
 
-- Workspace-wide file index — references, rename, code lens, and inlay hints currently only cover open documents; a background scanner will extend coverage to all project files
-- `textDocument/selectionRange` — smart expand/shrink selection (Alt+Shift+→)
-- `textDocument/onTypeFormatting` — auto-indent on structural keywords
-- Call hierarchy (`prepareCallHierarchy`, incoming/outgoing calls)
-- Code actions — fix keyword casing, add USING namespace
-- Semantic diagnostics — type errors, wrong argument counts, unknown identifiers
+- Broader type resolution — FOREACH variable types, assembly member types
 
 ---
 
@@ -50,21 +55,38 @@ XSharpLanguageServer/
 │   ├── XSharpSemanticTokensHandler.cs
 │   ├── XSharpDocumentSymbolHandler.cs
 │   ├── XSharpFoldingRangeHandler.cs
+│   ├── XSharpSelectionRangeHandler.cs
 │   ├── XSharpCompletionHandler.cs
 │   ├── XSharpHoverHandler.cs
 │   ├── XSharpGoToDefinitionHandler.cs
 │   ├── XSharpSignatureHelpHandler.cs
 │   ├── XSharpDidChangeConfigurationHandler.cs
+│   ├── XSharpDidChangeWatchedFilesHandler.cs
 │   ├── XSharpReferencesHandler.cs
 │   ├── XSharpRenameHandler.cs
-│   └── XSharpFormattingHandler.cs
+│   ├── XSharpPrepareRenameHandler.cs
+│   ├── XSharpFormattingHandler.cs
+│   ├── XSharpOnTypeFormattingHandler.cs
+│   ├── XSharpCodeActionHandler.cs
+│   ├── XSharpCodeLensHandler.cs
+│   ├── XSharpInlayHintsHandler.cs
+│   ├── XSharpWorkspaceSymbolHandler.cs
+│   └── XSharpCallHierarchyHandler.cs
 ├── Services/                — singleton services shared by all handlers
-│   ├── XSharpDocumentService.cs       — text buffer + parse cache + FindTokenLocations
-│   ├── XSharpDatabaseService.cs       — read-only access to X#Model.xsdb + auto-reconnect
-│   ├── XSharpDiagnosticsPublisher.cs  — pushes diagnostics to the client
-│   └── XSharpConfigurationService.cs  — workspace settings + XSharpParseOptions factory
+│   ├── XSharpDocumentService.cs           — text buffer + parse cache + FindTokenLocations
+│   ├── XSharpDatabaseService.cs           — read-only access to X#Model.xsdb + auto-reconnect (assembly symbols only)
+│   ├── XSharpWorkspaceIndex.cs            — in-memory symbol index built from source files
+│   ├── XSharpWorkspaceScanner.cs          — background scanner; populates the workspace index on startup and after saves
+│   ├── IndexSymbolExtractor.cs            — extracts symbols and identifier token locations from a parsed file
+│   ├── XSharpTypeResolver.cs              — local variable type inference for member completion
+│   ├── XSharpSemanticDiagnosticsService.cs — optional semantic analysis pass (argument counts, unknown calls)
+│   ├── XSharpDiagnosticsPublisher.cs      — pushes diagnostics to the client
+│   └── XSharpConfigurationService.cs      — workspace settings + XSharpParseOptions factory
 └── Models/
-    ├── DbSymbol.cs                — data-transfer object returned by database queries
+    ├── DbSymbol.cs                — DTO returned by database queries
+    ├── WorkspaceSymbol.cs         — DTO for workspace index symbols
+    ├── IdentifierLocation.cs      — token location entry in the per-file identifier map
+    ├── XSharpSymbolKind.cs        — symbol kind enum used by the workspace index
     └── XSharpWorkspaceSettings.cs — workspace configuration DTO
 ```
 
@@ -73,24 +95,41 @@ XSharpLanguageServer/
 | Component | Namespace | Role |
 |---|---|---|
 | `Program.cs` | `XSharpLanguageServer` | Server bootstrap, DI wiring, Serilog logging |
-| `XSharpDocumentService` | `.Services` | Central singleton: text buffer + parse cache (token stream, parse tree, diagnostics) per document; `FindTokenLocations()` shared helper for references and rename |
-| `XSharpDatabaseService` | `.Services` | Read-only SQLite access to `X#Model.xsdb`; located automatically from the LSP `rootUri`; `FileSystemWatcher` reconnects automatically when VS refreshes the file |
+| `XSharpDocumentService` | `.Services` | Central singleton: text buffer + parse cache (token stream, parse tree, diagnostics) per document; `FindTokenLocations()` shared helper |
+| `XSharpDatabaseService` | `.Services` | Read-only SQLite access to `X#Model.xsdb`; scoped to assembly-only symbols; `FileSystemWatcher` reconnects automatically when VS refreshes the file |
+| `XSharpWorkspaceIndex` | `.Services` | In-memory index of all project symbols and per-file identifier token locations; primary lookup for all handlers |
+| `XSharpWorkspaceScanner` | `.Services` | Background service that parses all source files at startup and after each save; feeds `XSharpWorkspaceIndex` |
+| `IndexSymbolExtractor` | `.Services` | Extracts `WorkspaceSymbol` entries and identifier token locations from a single parsed file |
+| `XSharpTypeResolver` | `.Services` | Infers local variable types from assignments and member access chains for member completion |
+| `XSharpSemanticDiagnosticsService` | `.Services` | Optional semantic analysis: wrong argument count, unknown call warnings; runs after each parse when enabled |
 | `XSharpConfigurationService` | `.Services` | Parses `workspace/didChangeConfiguration` payload; builds `XSharpParseOptions` from dialect, include paths, and preprocessor symbols |
 | `XSharpDiagnosticsPublisher` | `.Services` | Pushes errors/warnings to the client after each parse |
-| `XSharpTextDocumentSyncHandler` | `.Handlers` | Handles `didOpen/Change/Save/Close`, triggers re-parse |
+| `XSharpTextDocumentSyncHandler` | `.Handlers` | Handles `didOpen/Change/Save/Close`, triggers re-parse and index update |
 | `XSharpSemanticTokensHandler` | `.Handlers` | Reads parse cache, maps tokens to LSP semantic token types |
 | `XSharpDocumentSymbolHandler` | `.Handlers` | Walks parse tree, returns hierarchical `DocumentSymbol[]` for outline and breadcrumbs |
 | `XSharpFoldingRangeHandler` | `.Handlers` | Derives fold ranges from parse tree nodes, `#region`/`#endregion` pairs, and multi-line comments |
-| `XSharpCompletionHandler` | `.Handlers` | Keywords + in-file symbols + cross-file DB lookup; member completion after `.` / `:` |
-| `XSharpHoverHandler` | `.Handlers` | Prototype + XML doc comment for the word under the cursor |
-| `XSharpGoToDefinitionHandler` | `.Handlers` | File + line from the DB for the word under the cursor |
-| `XSharpSignatureHelpHandler` | `.Handlers` | All overloads of the enclosing call from the DB |
+| `XSharpSelectionRangeHandler` | `.Handlers` | Returns nested selection ranges following XSharp block structure |
+| `XSharpCompletionHandler` | `.Handlers` | Keywords + workspace index + DB assembly fallback; local type inference for member completion |
+| `XSharpHoverHandler` | `.Handlers` | Prototype + XML doc comment; workspace index first, DB assembly fallback |
+| `XSharpGoToDefinitionHandler` | `.Handlers` | Declaration lookup in workspace index; DB for assembly symbols |
+| `XSharpSignatureHelpHandler` | `.Handlers` | All overloads of the enclosing call from the workspace index / DB |
 | `XSharpDidChangeConfigurationHandler` | `.Handlers` | Applies updated workspace settings and triggers a full reparse |
-| `XSharpReferencesHandler` | `.Handlers` | Scans open-document token streams for usages; adds DB declaration sites when requested |
-| `XSharpRenameHandler` | `.Handlers` | Finds all token occurrences via `FindTokenLocations()`, returns `WorkspaceEdit` |
-| `XSharpFormattingHandler` | `.Handlers` | Uppercases keywords, normalises indentation; keyword map built from `XSharpLexer` reflection |
-| `DbSymbol` | `.Models` | DTO returned by all database query methods |
-| `XSharpWorkspaceSettings` | `.Models` | DTO for dialect, include paths, and preprocessor symbols |
+| `XSharpDidChangeWatchedFilesHandler` | `.Handlers` | Reacts to file creation/deletion events; updates workspace index accordingly |
+| `XSharpReferencesHandler` | `.Handlers` | Full-project reference search via workspace identifier token map |
+| `XSharpRenameHandler` | `.Handlers` | Renames across all project files via workspace index; returns `WorkspaceEdit` |
+| `XSharpPrepareRenameHandler` | `.Handlers` | Validates rename target and returns the token range before the editor prompts the user |
+| `XSharpFormattingHandler` | `.Handlers` | Uppercases keywords, normalises indentation per formatting settings |
+| `XSharpOnTypeFormattingHandler` | `.Handlers` | Auto-indents on structural keyword completion |
+| `XSharpCodeActionHandler` | `.Handlers` | Produces *Add USING* and *Fix keyword casing* code actions |
+| `XSharpCodeLensHandler` | `.Handlers` | Reference count annotations above declarations |
+| `XSharpInlayHintsHandler` | `.Handlers` | Parameter name annotations at call sites |
+| `XSharpWorkspaceSymbolHandler` | `.Handlers` | Project-wide symbol search via workspace index |
+| `XSharpCallHierarchyHandler` | `.Handlers` | Prepares call hierarchy and resolves incoming/outgoing calls via workspace index |
+| `DbSymbol` | `.Models` | DTO returned by database query methods |
+| `WorkspaceSymbol` | `.Models` | DTO for workspace index symbols |
+| `IdentifierLocation` | `.Models` | Token location entry in the per-file identifier map |
+| `XSharpSymbolKind` | `.Models` | Symbol kind enum used by the workspace index |
+| `XSharpWorkspaceSettings` | `.Models` | DTO for all workspace configuration settings |
 
 ### Parse pipeline
 
