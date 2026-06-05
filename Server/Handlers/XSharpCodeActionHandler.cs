@@ -134,12 +134,15 @@ namespace XSharpLanguageServer.Handlers
                         if (action != null) items.Add(new CommandOrCodeAction(action));
                     }
 
-                    // ── Step 22: Extract to function ──────────────────────
+                    // ── Step 22: Extract to function / method ────────────
                     if (hasSelection
                         && request.Range.Start.Line != request.Range.End.Line)
                     {
-                        var action = ComputeExtractFunctionAction(uri, text, request.Range);
-                        if (action != null) items.Add(new CommandOrCodeAction(action));
+                        var fnAction = ComputeExtractFunctionAction(uri, text, request.Range);
+                        if (fnAction != null) items.Add(new CommandOrCodeAction(fnAction));
+
+                        var mAction = ComputeExtractMethodAction(uri, text, request.Range);
+                        if (mAction != null) items.Add(new CommandOrCodeAction(mAction));
                     }
 
                     // ── Step 24: Inline variable ──────────────────────────
@@ -341,6 +344,157 @@ namespace XSharpLanguageServer.Handlers
                     Changes = new Dictionary<DocumentUri, IEnumerable<TextEdit>> { [uri] = edits },
                 },
             };
+        }
+
+        // ====================================================================
+        // Extract to method (inside the enclosing class)
+        // ====================================================================
+
+        private CodeAction? ComputeExtractMethodAction(
+            DocumentUri uri, string text, LspRange selection)
+        {
+            var lines  = text.Split('\n');
+            int startL = (int)selection.Start.Line;
+            int endL   = (int)selection.End.Line;
+
+            if (startL >= lines.Length || endL >= lines.Length) return null;
+
+            if (!_documentService.TryGetParsed(uri, out var parsed)
+                || parsed.Tree == null
+                || parsed.TokenStream is not BufferedTokenStream stream)
+                return null;
+
+            stream.Fill();
+
+            // Must be inside a class method (not a standalone FUNCTION/PROCEDURE).
+            FindEnclosingFunc(parsed.Tree, selection.Start, out var funcCtx, out var sig);
+            if (funcCtx is not XSharpParser.MethodContext methodCtx) return null;
+
+            // Find the enclosing class so we know where to insert the new method.
+            FindEnclosingClass(parsed.Tree, selection.Start, out var classCtx);
+            if (classCtx?.Stop == null) return null;
+
+            // Is the enclosing method STATIC?
+            bool isStatic = methodCtx.Mods != null &&
+                Regex.IsMatch(methodCtx.Mods.SourceText ?? "", @"\bSTATIC\b",
+                    RegexOptions.IgnoreCase);
+
+            // ── Parameter analysis (same logic as extract-to-function) ────
+            var parameters = new List<(string Name, string TypeName)>();
+            var idsInSelection = CollectIdTokensInRange(stream, startL, endL);
+            var localsInside   = CollectLocalsInRange(funcCtx, startL, endL);
+            var localsBefore   = CollectLocalsBefore(funcCtx, startL);
+            var funcParamMap   = CollectFuncParams(sig);
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var id in idsInSelection)
+            {
+                if (!seen.Add(id)) continue;
+                if (IsXSharpKeyword(id)) continue;
+                if (localsInside.ContainsKey(id)) continue;
+                if (IsGlobalSymbol(id)) continue;
+
+                string? typeName = null;
+                if (localsBefore.TryGetValue(id, out var lt)) typeName = lt;
+                else if (funcParamMap.TryGetValue(id, out var pt)) typeName = pt;
+                else continue;
+
+                parameters.Add((id, CleanParamType(typeName)));
+            }
+
+            // ── Formatting ───────────────────────────────────────────────
+            string eol        = text.Contains('\r') ? "\r\n" : "\n";
+            string methodName = "NewMethod";
+            string staticKw   = isStatic ? "STATIC " : "";
+
+            // Detect the indentation of the enclosing METHOD line and derive body indent.
+            int    encMethodLine  = Math.Max(0, methodCtx.Start.Line - 1);
+            string encLineText    = encMethodLine < lines.Length ? lines[encMethodLine] : "";
+            string methIndent     = encLineText.Substring(
+                0, encLineText.Length - encLineText.TrimStart().Length);
+            string bodyIndent     = methIndent + "    ";
+
+            string paramDecl = parameters.Count > 0
+                ? string.Join(", ", parameters.Select(p => $"{p.Name} AS {p.TypeName}"))
+                : string.Empty;
+            string callArgs = parameters.Count > 0
+                ? string.Join(", ", parameters.Select(p => p.Name))
+                : string.Empty;
+
+            var bodyLines = new List<string>();
+            for (int i = startL; i <= endL; i++)
+                bodyLines.Add(bodyIndent + lines[i].TrimEnd('\r').TrimStart());
+            string body = string.Join(eol, bodyLines);
+
+            // New method inserted just before the ENDCLASS token.
+            int endClassLine = Math.Max(0, classCtx.Stop.Line - 1);
+
+            string newMethod =
+                $"{eol}{methIndent}{staticKw}METHOD {methodName}({paramDecl}) AS VOID{eol}" +
+                $"{body}{eol}" +
+                $"{methIndent}RETURN{eol}";
+
+            // Call site: SELF:Method() for instance, bare name for static.
+            string callIndent = lines[startL].TrimEnd('\r')[
+                ..(lines[startL].Length - lines[startL].TrimStart().Length)];
+            string callPrefix = isStatic ? "" : "SELF:";
+
+            var edits = new List<TextEdit>
+            {
+                // Insert the new method before ENDCLASS.
+                new TextEdit
+                {
+                    Range   = new LspRange(
+                                  new Position(endClassLine, 0),
+                                  new Position(endClassLine, 0)),
+                    NewText = newMethod,
+                },
+                // Replace selected lines with the method call.
+                new TextEdit
+                {
+                    Range   = new LspRange(
+                                  new Position(startL, 0),
+                                  new Position(endL, lines[endL].TrimEnd('\r').Length)),
+                    NewText = $"{callIndent}{callPrefix}{methodName}({callArgs})",
+                },
+            };
+
+            string title = isStatic ? "Extract to static method" : "Extract to method";
+            return new CodeAction
+            {
+                Title = title,
+                Kind  = CodeActionKind.RefactorExtract,
+                Edit  = new WorkspaceEdit
+                {
+                    Changes = new Dictionary<DocumentUri, IEnumerable<TextEdit>> { [uri] = edits },
+                },
+            };
+        }
+
+        // Finds the innermost Class_Context whose range contains the cursor.
+        private static void FindEnclosingClass(
+            IParseTree root, Position cursor,
+            out XSharpParser.Class_Context? classCtx)
+        {
+            classCtx = null;
+            WalkForClass(root, cursor, ref classCtx);
+        }
+
+        private static void WalkForClass(
+            IParseTree node, Position cursor,
+            ref XSharpParser.Class_Context? classCtx)
+        {
+            if (node is not XSharpParserRuleContext ctx) return;
+
+            int startLine = ctx.Start != null ? Math.Max(0, ctx.Start.Line - 1) : 0;
+            int stopLine  = ctx.Stop  != null ? Math.Max(0, ctx.Stop.Line  - 1) : startLine;
+            if (cursor.Line < startLine || cursor.Line > stopLine) return;
+
+            if (ctx is XSharpParser.Class_Context cc)
+                classCtx = cc;  // keep updating so we end up with the innermost match
+
+            for (int i = 0; i < node.ChildCount; i++)
+                WalkForClass(node.GetChild(i), cursor, ref classCtx);
         }
 
         // ── Parameter analysis helpers ─────────────────────────────────────
