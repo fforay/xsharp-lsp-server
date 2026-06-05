@@ -123,10 +123,15 @@ namespace XSharpLanguageServer.Handlers
                     var token = (XSharpToken)tokens[i];
                     string? tokenType = ClassifyToken(token);
 
-                    // FoxPro star-comment: the lexer emits a MULT token for the leading '*'
-                    // followed by a SL_COMMENT token for the rest of the line.
-                    // Reclassify the MULT so the whole line is highlighted as a comment.
-                    if (token.Type == XSharpLexer.MULT
+                    // FoxPro line-comment starters that the lexer emits as operator tokens
+                    // followed by SL_COMMENT for the rest of the line:
+                    //   *  → MULT  (single star at line start)
+                    //   ** → EXP   (double star at line start)
+                    //   && → FOX_AND (anywhere on the line)
+                    // Reclassify the operator token so the full comment is highlighted.
+                    if ((token.Type == XSharpLexer.MULT
+                            || token.Type == XSharpLexer.EXP
+                            || token.Type == XSharpLexer.FOX_AND)
                         && i + 1 < tokens.Count
                         && tokens[i + 1].Type == XSharpLexer.SL_COMMENT
                         && tokens[i + 1].Line == token.Line)
