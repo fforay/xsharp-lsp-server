@@ -103,58 +103,73 @@ namespace XSharpLanguageServer.Services
             string filePath,
             string[] lines,
             string? currentTypeName,
-            List<WorkspaceSymbol> results)
+            List<WorkspaceSymbol> results,
+            string? currentNamespace = null)
         {
             if (node is not XSharpParserRuleContext ctx) return;
 
             switch (ctx)
             {
-                // ── Namespace — not added as a symbol; recurse into children ──
+                // ── Namespace — extract name, recurse with it set ──────────────
                 case XSharpParser.Namespace_Context ns:
-                    WalkChildren(ns, filePath, lines, currentTypeName, results);
+                {
+                    string? nsName = ns.Name?.GetText() ?? ns.Start?.Text;
+                    WalkChildren(ns, filePath, lines, currentTypeName, results,
+                        currentNamespace: nsName ?? currentNamespace);
                     break;
+                }
 
                 // ── Type declarations ─────────────────────────────────────────
                 case XSharpParser.Class_Context cls when cls.Id != null:
                     Add(results, cls.Id.GetText(), XSharpSymbolKind.Class,
                         returnType: null, cls, filePath, lines, currentTypeName,
-                        inheritsFrom: cls.BaseType?.GetText());
-                    WalkMembers(cls._Members, filePath, lines, cls.Id.GetText(), results);
+                        inheritsFrom: cls.BaseType?.GetText(),
+                        ns: currentNamespace);
+                    WalkMembers(cls._Members, filePath, lines, cls.Id.GetText(), results,
+                        currentNamespace);
                     break;
 
                 case XSharpParser.Interface_Context iface when iface.Id != null:
                     Add(results, iface.Id.GetText(), XSharpSymbolKind.Interface,
-                        returnType: null, iface, filePath, lines, currentTypeName);
-                    WalkMembers(iface._Members, filePath, lines, iface.Id.GetText(), results);
+                        returnType: null, iface, filePath, lines, currentTypeName,
+                        ns: currentNamespace);
+                    WalkMembers(iface._Members, filePath, lines, iface.Id.GetText(), results,
+                        currentNamespace);
                     break;
 
                 case XSharpParser.Structure_Context strct when strct.Id != null:
                     Add(results, strct.Id.GetText(), XSharpSymbolKind.Structure,
-                        returnType: null, strct, filePath, lines, currentTypeName);
-                    WalkMembers(strct._Members, filePath, lines, strct.Id.GetText(), results);
+                        returnType: null, strct, filePath, lines, currentTypeName,
+                        ns: currentNamespace);
+                    WalkMembers(strct._Members, filePath, lines, strct.Id.GetText(), results,
+                        currentNamespace);
                     break;
 
                 case XSharpParser.Enum_Context en when en.Id != null:
                     Add(results, en.Id.GetText(), XSharpSymbolKind.Enum,
-                        returnType: null, en, filePath, lines, currentTypeName);
+                        returnType: null, en, filePath, lines, currentTypeName,
+                        ns: currentNamespace);
                     WalkEnumMembers(en, filePath, lines, results);
                     break;
 
                 case XSharpParser.Delegate_Context del when del.Id != null:
                     Add(results, del.Id.GetText(), XSharpSymbolKind.Delegate,
-                        returnType: null, del, filePath, lines, currentTypeName);
+                        returnType: null, del, filePath, lines, currentTypeName,
+                        ns: currentNamespace);
                     break;
 
                 case XSharpParser.VostructContext vos when vos.Id != null:
                     Add(results, vos.Id.GetText(), XSharpSymbolKind.Structure,
-                        returnType: null, vos, filePath, lines, currentTypeName);
-                    WalkChildren(vos, filePath, lines, vos.Id.GetText(), results);
+                        returnType: null, vos, filePath, lines, currentTypeName,
+                        ns: currentNamespace);
+                    WalkChildren(vos, filePath, lines, vos.Id.GetText(), results, currentNamespace);
                     break;
 
                 case XSharpParser.VounionContext vou when vou.Id != null:
                     Add(results, vou.Id.GetText(), XSharpSymbolKind.Structure,
-                        returnType: null, vou, filePath, lines, currentTypeName);
-                    WalkChildren(vou, filePath, lines, vou.Id.GetText(), results);
+                        returnType: null, vou, filePath, lines, currentTypeName,
+                        ns: currentNamespace);
+                    WalkChildren(vou, filePath, lines, vou.Id.GetText(), results, currentNamespace);
                     break;
 
                 // ── Global functions and procedures ───────────────────────────
@@ -244,10 +259,11 @@ namespace XSharpLanguageServer.Services
             string filePath,
             string[] lines,
             string? currentTypeName,
-            List<WorkspaceSymbol> results)
+            List<WorkspaceSymbol> results,
+            string? currentNamespace = null)
         {
             for (int i = 0; i < node.ChildCount; i++)
-                Walk(node.GetChild(i), filePath, lines, currentTypeName, results);
+                Walk(node.GetChild(i), filePath, lines, currentTypeName, results, currentNamespace);
         }
 
         private static void WalkMembers(
@@ -255,11 +271,12 @@ namespace XSharpLanguageServer.Services
             string filePath,
             string[] lines,
             string typeName,
-            List<WorkspaceSymbol> results)
+            List<WorkspaceSymbol> results,
+            string? currentNamespace = null)
         {
             if (members == null) return;
             foreach (var cm in members)
-                Walk(cm, filePath, lines, typeName, results);
+                Walk(cm, filePath, lines, typeName, results, currentNamespace);
         }
 
         private static void WalkEnumMembers(
@@ -284,7 +301,8 @@ namespace XSharpLanguageServer.Services
             string filePath,
             string[] lines,
             string? typeName,
-            string? inheritsFrom = null)
+            string? inheritsFrom = null,
+            string? ns = null)
         {
             if (string.IsNullOrWhiteSpace(name)) return;
 
@@ -309,6 +327,7 @@ namespace XSharpLanguageServer.Services
                 StartCol    = startCol,
                 TypeName    = typeName,
                 InheritsFrom = string.IsNullOrEmpty(inheritsFrom) ? null : inheritsFrom,
+                Namespace   = string.IsNullOrEmpty(ns) ? null : ns,
             });
         }
     }

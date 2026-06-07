@@ -39,6 +39,13 @@ namespace XSharpLanguageServer.Models
         public string? TypeName { get; init; }
 
         /// <summary>
+        /// Namespace the symbol is declared in (from a <c>BEGIN NAMESPACE</c> block),
+        /// or <c>null</c> when declared at file scope.
+        /// Used by the <em>Add USING</em> code action to insert the correct directive.
+        /// </summary>
+        public string? Namespace { get; init; }
+
+        /// <summary>
         /// Name of the parent class from the <c>INHERIT</c> clause, or <c>null</c>
         /// when not a class declaration or no parent is specified.
         /// Used by <see cref="XSharpLanguageServer.Services.XSharpWorkspaceIndex.GetMembersOf"/>

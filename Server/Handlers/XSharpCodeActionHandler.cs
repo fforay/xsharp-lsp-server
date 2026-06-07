@@ -31,11 +31,12 @@ namespace XSharpLanguageServer.Handlers
     ///   </item>
     ///   <item>
     ///     <b>Add USING namespace</b> (<c>quickfix</c>) — looks up the word
-    ///     under the cursor in <c>ReferencedTypes</c> in the assembly DB and,
-    ///     if a namespace is found, inserts a <c>USING</c> directive after the
-    ///     last existing <c>USING</c> line (or at the top of the file).
-    ///     Only offered when the DB is available and the namespace is not
-    ///     already imported.
+    ///     under the cursor in <c>ReferencedTypes</c> in the assembly DB,
+    ///     falling back to source types declared in a <c>BEGIN NAMESPACE</c>
+    ///     block elsewhere in the workspace index. If a namespace is found,
+    ///     inserts a <c>USING</c> directive after the last existing
+    ///     <c>USING</c> line (or at the top of the file). Not offered when
+    ///     the namespace is already imported.
     ///   </item>
     ///   <item>
     ///     <b>Introduce variable</b> (<c>refactor.extract</c>) — wraps the
@@ -696,9 +697,12 @@ namespace XSharpLanguageServer.Handlers
             DocumentUri uri, string text, string typeName)
         {
             var results = new List<CommandOrCodeAction>();
-            if (!_dbService.IsAvailable) return results;
 
-            var ns = _dbService.FindAssemblyTypeNamespace(typeName);
+            // Assembly types first (DB lookup), then source types declared in
+            // a BEGIN NAMESPACE block elsewhere in the workspace.
+            string? ns = _dbService.IsAvailable ? _dbService.FindAssemblyTypeNamespace(typeName) : null;
+            if (string.IsNullOrEmpty(ns))
+                ns = _workspaceIndex.FindExact(typeName)?.Namespace;
             if (string.IsNullOrEmpty(ns)) return results;
 
             var lines = text.Split('\n');
