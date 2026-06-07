@@ -423,8 +423,11 @@ namespace XSharpLanguageServer.Handlers
 
         /// <summary>
         /// Scans leftward from <paramref name="cursor"/> to detect a member-access
-        /// expression of the form <c>identifier.</c> or <c>identifier:</c>.
-        /// Returns the identifier (potential type name) if found, otherwise <c>null</c>.
+        /// expression such as <c>identifier:</c>, <c>GetFoo():</c>, or a deeper
+        /// chain like <c>oObj:GetFoo():GetBar():</c>.
+        /// Returns the full chain text (e.g. <c>"oObj:GetFoo():GetBar()"</c>) so
+        /// <see cref="XSharpTypeResolver.Resolve"/> can walk it segment by segment,
+        /// or <c>null</c> when no member-access expression precedes the cursor.
         /// </summary>
         private string? GetMemberAccessType(DocumentUri uri, Position cursor)
         {
@@ -445,35 +448,64 @@ namespace XSharpLanguageServer.Handlers
 
             if (beforeTrigger < 0) return null;
 
-            // ── Chained call: Name():  ────────────────────────────────────
-            if (text[beforeTrigger] == ')')
+            int chainStart = FindChainStart(text, beforeTrigger);
+            if (chainStart < 0) return null;
+
+            return text.Substring(chainStart, beforeTrigger - chainStart + 1);
+        }
+
+        /// <summary>
+        /// Walks backward from <paramref name="end"/> (inclusive) over a sequence of
+        /// <c>:</c>/<c>.</c>-separated segments — each either a plain identifier
+        /// (<c>Foo</c>) or a call with balanced parentheses (<c>Foo(args)</c>) —
+        /// and returns the start offset of the whole chain, or <c>-1</c> when
+        /// <paramref name="end"/> is not the end of a recognisable chain segment.
+        /// </summary>
+        private static int FindChainStart(string text, int end)
+        {
+            int pos = end;
+            int chainStart = -1;
+
+            while (pos >= 0)
             {
-                // Find the '(' that matches this ')'.
-                int depth = 1;
-                int pos   = beforeTrigger - 1;
-                while (pos >= 0 && depth > 0)
+                // ── Call segment: Name(args) — skip the balanced (...) part ──
+                if (text[pos] == ')')
                 {
-                    if      (text[pos] == ')') depth++;
-                    else if (text[pos] == '(') depth--;
-                    pos--;
+                    int depth = 1;
+                    int p = pos - 1;
+                    while (p >= 0 && depth > 0)
+                    {
+                        if      (text[p] == ')') depth++;
+                        else if (text[p] == '(') depth--;
+                        p--;
+                    }
+                    if (depth != 0) break;   // unbalanced — not a chain we recognise
+                    pos = p;
+                    while (pos >= 0 && char.IsWhiteSpace(text[pos])) pos--;
                 }
-                // pos is now just before '(' — skip whitespace then extract name.
-                while (pos >= 0 && char.IsWhiteSpace(text[pos])) pos--;
-                int nameEnd = pos + 1;
+
+                if (pos < 0 || !IsWordChar(text[pos])) break;
+
+                int identEnd = pos;
                 while (pos >= 0 && IsWordChar(text[pos])) pos--;
-                int nameStart = pos + 1;
-                if (nameStart >= nameEnd) return null;
-                return text.Substring(nameStart, nameEnd - nameStart);
+                int identStart = pos + 1;
+                if (identStart > identEnd) break;
+
+                chainStart = identStart;
+
+                // Is there a chain separator ('.' or ':') before this segment?
+                int sep = pos;
+                while (sep >= 0 && char.IsWhiteSpace(text[sep])) sep--;
+                if (sep >= 0 && (text[sep] == ':' || text[sep] == '.'))
+                {
+                    pos = sep - 1;
+                    continue;
+                }
+
+                break;
             }
 
-            // ── Plain identifier: foo:  ───────────────────────────────────
-            int end   = beforeTrigger + 1;
-            int start = beforeTrigger;
-            while (start > 0 && IsWordChar(text[start - 1]))
-                start--;
-
-            if (start == end) return null;
-            return text.Substring(start, end - start);
+            return chainStart;
         }
 
         /// <summary>

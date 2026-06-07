@@ -2,16 +2,25 @@ using LanguageService.CodeAnalysis.XSharp.SyntaxParser;
 using LanguageService.SyntaxTree.Tree;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using System;
+using System.Collections.Generic;
 using XSharpLanguageServer.Models;
 
 namespace XSharpLanguageServer.Services
 {
     /// <summary>
-    /// Resolves the identifier before a member-access trigger (<c>.</c> or <c>:</c>)
+    /// Resolves the expression before a member-access trigger (<c>.</c> or <c>:</c>)
     /// to a type name so that <see cref="XSharpWorkspaceIndex.GetMembersOf"/> can
     /// return the correct set of completion items.
     /// <para>
-    /// Resolution order (first match wins):
+    /// The expression may be a single identifier (<c>oObj:</c>) or a chain of
+    /// <c>:</c>/<c>.</c>-separated segments, each a plain name or a call
+    /// (<c>oObj:GetFoo():GetBar():</c>). The chain is walked left to right:
+    /// the first segment is resolved with the rules below, then each following
+    /// segment is looked up as a member of the type resolved so far — its
+    /// declared return type becomes the type for the next segment.
+    /// </para>
+    /// <para>
+    /// First-segment resolution order (first match wins):
     /// <list type="number">
     ///   <item><c>SELF</c> → name of the enclosing class.</item>
     ///   <item>Parameter of the enclosing function/method with a matching name.</item>
@@ -21,22 +30,24 @@ namespace XSharpLanguageServer.Services
     ///   <item>Identifier is itself a known type name in the workspace index
     ///         (static / class reference).</item>
     ///   <item>Identifier is a callable in the workspace index — return its declared
-    ///         return type (supports chained-call completion: <c>GetFoo():Bar</c>).</item>
+    ///         return type.</item>
     ///   <item>Identifier is a callable from a referenced assembly — return type looked
     ///         up via <see cref="XSharpDatabaseService.FindAssemblyOverloads"/>.</item>
     /// </list>
     /// </para>
     /// <para>
-    /// Known limitations:
-    /// <c>VAR</c>/<c>DYNAMIC</c> locals are not resolved (no explicit type);
-    /// deeply nested chains (<c>A():B():C:</c>) resolve only the outermost call.
+    /// Known limitations: <c>VAR</c>/<c>DYNAMIC</c> locals are not resolved (no
+    /// explicit type); chain walking stops at the first segment whose member
+    /// cannot be found or whose return type is unknown.
     /// </para>
     /// </summary>
     public static class XSharpTypeResolver
     {
         /// <summary>
-        /// Attempts to resolve <paramref name="rawIdentifier"/> (the text immediately
-        /// before the <c>.</c> or <c>:</c> trigger) to a type name.
+        /// Attempts to resolve <paramref name="rawIdentifier"/> — the member-access
+        /// expression immediately before the <c>.</c> or <c>:</c> trigger, which may
+        /// be a single identifier or a <c>:</c>/<c>.</c>-separated chain such as
+        /// <c>oObj:GetFoo():GetBar()</c> — to a type name.
         /// Returns <c>null</c> when resolution fails.
         /// </summary>
         /// <param name="dbService">
@@ -52,6 +63,41 @@ namespace XSharpLanguageServer.Services
         {
             if (string.IsNullOrEmpty(rawIdentifier)) return null;
 
+            var segments = SplitChain(rawIdentifier);
+            if (segments.Count == 0) return null;
+
+            string firstName = SegmentName(segments[0]);
+            if (string.IsNullOrEmpty(firstName)) return null;
+
+            string? currentType = ResolveIdentifier(
+                tree, cursor, firstName, workspaceIndex, dbService);
+            if (currentType == null) return null;
+
+            // Walk the remaining chain segments as members of the progressively
+            // resolved type — each segment's declared return type feeds the next.
+            for (int i = 1; i < segments.Count; i++)
+            {
+                string memberName = SegmentName(segments[i]);
+                if (string.IsNullOrEmpty(memberName)) return null;
+
+                currentType = ResolveMemberType(currentType, memberName, workspaceIndex, dbService);
+                if (currentType == null) return null;
+            }
+
+            return currentType;
+        }
+
+        /// <summary>
+        /// Resolves a single identifier — the first segment of a member-access
+        /// chain, or the whole expression when it is not a chain — to a type name.
+        /// </summary>
+        private static string? ResolveIdentifier(
+            XSharpParserRuleContext tree,
+            Position cursor,
+            string rawIdentifier,
+            XSharpWorkspaceIndex workspaceIndex,
+            XSharpDatabaseService? dbService)
+        {
             // SELF → resolve to the enclosing class name.
             if (string.Equals(rawIdentifier, "SELF", StringComparison.OrdinalIgnoreCase))
                 return FindEnclosingClassName(tree, cursor);
@@ -114,7 +160,6 @@ namespace XSharpLanguageServer.Services
                     return rawIdentifier;
 
                 // 5. Identifier is a callable — return its declared return type.
-                //    Supports chained-call completion: GetFoo():Bar.
                 if (!string.IsNullOrEmpty(sym.ReturnType))
                     return CleanTypeName(sym.ReturnType);
             }
@@ -325,6 +370,107 @@ namespace XSharpLanguageServer.Services
             int dot   = expr.LastIndexOf('.');
             int sep   = Math.Max(colon, dot);
             return sep >= 0 ? expr[(sep + 1)..] : expr;
+        }
+
+        // ====================================================================
+        // Chain walking  (oObj:GetFoo():GetBar() → resolve segment by segment)
+        // ====================================================================
+
+        /// <summary>
+        /// Splits a member-access chain into its <c>:</c>/<c>.</c>-separated
+        /// segments, ignoring separators that appear inside balanced
+        /// <c>()</c>/<c>[]</c> or string/char literals (e.g. call arguments).
+        /// </summary>
+        private static List<string> SplitChain(string chain)
+        {
+            var segments = new List<string>();
+            int depth = 0;
+            int start = 0;
+            bool inString = false;
+            char quote = '\0';
+
+            for (int i = 0; i < chain.Length; i++)
+            {
+                char c = chain[i];
+                if (inString)
+                {
+                    if (c == quote) inString = false;
+                    continue;
+                }
+
+                switch (c)
+                {
+                    case '"':
+                    case '\'':
+                        inString = true;
+                        quote    = c;
+                        break;
+                    case '(':
+                    case '[':
+                        depth++;
+                        break;
+                    case ')':
+                    case ']':
+                        depth--;
+                        break;
+                    case ':':
+                    case '.':
+                        if (depth == 0)
+                        {
+                            segments.Add(chain[start..i]);
+                            start = i + 1;
+                        }
+                        break;
+                }
+            }
+
+            segments.Add(chain[start..]);
+            return segments;
+        }
+
+        /// <summary>
+        /// Extracts the bare name from a chain segment, stripping a trailing
+        /// call's argument list: <c>GetFoo(x, y)</c> → <c>GetFoo</c>.
+        /// </summary>
+        private static string SegmentName(string segment)
+        {
+            segment = segment.Trim();
+            int paren = segment.IndexOf('(');
+            return (paren > 0 ? segment[..paren] : segment).Trim();
+        }
+
+        /// <summary>
+        /// Looks up <paramref name="memberName"/> as a member of
+        /// <paramref name="typeName"/> — workspace index first, then assembly
+        /// reflection — and returns its declared return type, cleaned for use
+        /// as the next chain segment's receiver type.
+        /// </summary>
+        private static string? ResolveMemberType(
+            string typeName,
+            string memberName,
+            XSharpWorkspaceIndex workspaceIndex,
+            XSharpDatabaseService? dbService)
+        {
+            foreach (var member in workspaceIndex.GetMembersOf(typeName))
+            {
+                if (!string.Equals(member.Name, memberName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var t = CleanTypeName(member.ReturnType);
+                if (t != null) return t;
+            }
+
+            if (dbService != null)
+            {
+                foreach (var member in dbService.FindAssemblyMembersOf(typeName))
+                {
+                    if (!string.Equals(member.Name, memberName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var t = CleanTypeName(member.ReturnType);
+                    if (t != null) return t;
+                }
+            }
+
+            return null;
         }
 
         // ====================================================================
