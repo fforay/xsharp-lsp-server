@@ -23,25 +23,27 @@ namespace XSharpLanguageServer.Handlers
     /// <see cref="CodeLens.Data"/> so the resolve phase can retrieve it.
     /// </para>
     /// <para>
-    /// Phase 2 (<c>codeLens/resolve</c>): counts the number of
-    /// <c>ID</c>-token occurrences matching the symbol name across all
-    /// currently open documents via
-    /// <see cref="XSharpDocumentService.FindTokenLocations"/>, then sets the
-    /// lens title to <c>"N references"</c>.  The command is intentionally
-    /// left non-executable (no command ID) so clicking it is a no-op; it
-    /// serves purely as an informational annotation.
+    /// Phase 2 (<c>codeLens/resolve</c>): counts token occurrences using a
+    /// hybrid two-source approach — workspace index (all indexed files) merged
+    /// with open-document live text (unsaved edits), deduped by
+    /// <c>(filePath, line)</c> with open-document results winning.
+    /// The declaration site itself is subtracted so the count reflects
+    /// callers/usages only.  The lens title is set to <c>"N references"</c>.
     /// </para>
     /// </summary>
     public class XSharpCodeLensHandler : CodeLensHandlerBase
     {
         private readonly XSharpDocumentService          _documentService;
+        private readonly XSharpWorkspaceIndex           _workspaceIndex;
         private readonly ILogger<XSharpCodeLensHandler> _logger;
 
         public XSharpCodeLensHandler(
             XSharpDocumentService           documentService,
+            XSharpWorkspaceIndex            workspaceIndex,
             ILogger<XSharpCodeLensHandler>  logger)
         {
             _documentService = documentService;
+            _workspaceIndex  = workspaceIndex;
             _logger          = logger;
         }
 
@@ -107,10 +109,23 @@ namespace XSharpLanguageServer.Handlers
                 if (string.IsNullOrEmpty(name))
                     return Task.FromResult(WithTitle(request, "0 references"));
 
-                // Count token occurrences across all open documents.
+                // ── Hybrid count: workspace index + open-doc live text ────────
+                // Key: (normalised file path, line) — open-doc results win.
+                var seen = new HashSet<(string FilePath, int Line)>(FileLineComparer.Instance);
+
+                // Tier 1: workspace index (all indexed files, last-saved state).
+                foreach (var tok in _workspaceIndex.FindTokenLocations(name))
+                    seen.Add((NormalizePath(tok.FilePath), tok.Line));
+
+                // Tier 2: open documents (unsaved edits may differ from index).
+                foreach (var (uri, line, _, _) in _documentService.FindTokenLocations(name))
+                {
+                    string? fp = uri.GetFileSystemPath();
+                    seen.Add((NormalizePath(fp ?? uri.ToString()), line));
+                }
+
                 // Subtract 1 to exclude the declaration itself.
-                int total = _documentService.FindTokenLocations(name).Count;
-                int refs  = Math.Max(0, total - 1);
+                int refs = Math.Max(0, seen.Count - 1);
 
                 string title = refs == 1 ? "1 reference" : $"{refs} references";
                 return Task.FromResult(WithTitle(request, title));
@@ -126,10 +141,6 @@ namespace XSharpLanguageServer.Handlers
         // Parse tree walker
         // ----------------------------------------------------------------
 
-        /// <summary>
-        /// Recursively walks <paramref name="node"/> and appends one
-        /// <see cref="CodeLens"/> for every recognised named declaration.
-        /// </summary>
         private static void CollectLenses(
             IParseTree        node,
             List<CodeLens>    lenses,
@@ -156,14 +167,9 @@ namespace XSharpLanguageServer.Handlers
                 CollectLenses(node.GetChild(i), lenses, ct);
         }
 
-        /// <summary>
-        /// Extracts the declared name and 0-based start line from a recognised
-        /// parse tree node.  Returns <c>(null, -1)</c> for non-declaration nodes.
-        /// </summary>
         private static (string? Name, int Line) ExtractDeclaration(
             XSharpParserRuleContext ctx)
         {
-            // XSharp token lines are 1-based; LSP is 0-based.
             int L(LanguageService.SyntaxTree.IToken? t) =>
                 t == null ? -1 : Math.Max(0, t.Line - 1);
 
@@ -203,5 +209,23 @@ namespace XSharpLanguageServer.Handlers
                 Data    = lens.Data,
                 Command = new Command { Title = title },
             };
+
+        private static string NormalizePath(string path)
+            => path.Replace('\\', '/').TrimEnd('/');
+
+        private sealed class FileLineComparer
+            : IEqualityComparer<(string FilePath, int Line)>
+        {
+            public static readonly FileLineComparer Instance = new();
+
+            public bool Equals((string FilePath, int Line) x, (string FilePath, int Line) y)
+                => x.Line == y.Line
+                && string.Equals(x.FilePath, y.FilePath, StringComparison.OrdinalIgnoreCase);
+
+            public int GetHashCode((string FilePath, int Line) obj)
+                => HashCode.Combine(
+                    StringComparer.OrdinalIgnoreCase.GetHashCode(obj.FilePath),
+                    obj.Line);
+        }
     }
 }
