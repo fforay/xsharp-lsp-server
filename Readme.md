@@ -18,12 +18,12 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Document symbols** — hierarchical outline of all declared entities (namespaces, classes, interfaces, structs, enums, functions, methods, properties, events, fields, …) for the outline panel and `Ctrl+Shift+O` navigation (`textDocument/documentSymbol`)
 - **Folding ranges** — collapse type declarations, member declarations, control-flow blocks (`IF`, `FOR`, `FOREACH`, `WHILE`, `REPEAT`, `DO`/`DO WHILE`/`DO CASE`, `SWITCH`, `TRY`, `WITH`), `#region`/`#endregion` pairs, and multi-line comments (`textDocument/foldingRange`)
 - **Selection range** — smart expand / shrink selection following XSharp block structure (Alt+Shift+→ in VS Code) (`textDocument/selectionRange`)
-- **Completion** — keywords + document symbols + cross-file workspace index lookup; DB queried as assembly-only fallback; member completion after `.` and `:` with local type inference (`textDocument/completion`)
+- **Completion** — keywords + document symbols + cross-file workspace index lookup; DB queried as assembly-only fallback; member completion after `.` and `:` with local type inference, assembly member reflection (`STRING:Length`, `INT:ToString()`, etc.), and chained call return-type resolution (`GetFoo():Bar`) (`textDocument/completion`)
 - **Hover** — prototype and XML doc comments for the symbol under the cursor; workspace index queried first, IntelliSense database as fallback (`textDocument/hover`)
 - **Go to definition** — jumps to the declaration in workspace source files or, for assembly symbols, to the DB entry (`textDocument/definition`)
 - **Signature help** — parameter hints for all overloads of a function call (`textDocument/signatureHelp`)
 - **Find references** — locates all usages across the entire project via the workspace token index (not limited to open documents); declaration sites also returned when requested (`textDocument/references`)
-- **Rename symbol** — renames every occurrence across all project files (open and closed) via the workspace index; `textDocument/prepareRename` validates the target before prompting (`textDocument/rename`)
+- **Rename symbol** — renames every occurrence across all project files (open and closed) via the workspace index; scope-aware: `LOCAL`/`VAR` variables, parameters, `MEMVAR`/`PARAMETERS` (Clipper-style) are scoped to the enclosing function; global symbols, types, and members are renamed project-wide; `textDocument/prepareRename` validates the target before prompting (`textDocument/rename`)
 - **Document formatting** — uppercases all XSharp keywords to their canonical spelling and normalises indentation; handles sequential member declarations, single-line and multi-line PROPERTY forms, GET/SET accessor blocks, `DO CASE`/`SWITCH` two-level container/body model, multi-line continuation (`;`), and all `END` / `END X` terminator variants; uses client-supplied tab size / insert-spaces options; keyword map built automatically from `XSharpLexer` reflection (`textDocument/formatting`)
 - **On-type formatting** — auto-indents the current line as structural keywords are completed (`textDocument/onTypeFormatting`)
 - **Formatting settings** — full set of indentation and keyword-casing options exposed as VS Code workspace settings: `IndentCaseLabel`, `IndentCaseContent`, `IndentBlockContent`, `IndentEntityContent`, `IndentFieldContent`, `IndentNamespace`, `IndentMultiLines`, `KeywordCase`, `TrimTrailingWhitespace`, `InsertFinalNewline`
@@ -37,7 +37,7 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 
 ### Planned
 
-- Broader type resolution — FOREACH variable types, assembly member types
+- Deeper type resolution — FOREACH variable types, `VAR`/`DYNAMIC` local inference
 
 ---
 
@@ -78,7 +78,8 @@ XSharpLanguageServer/
 │   ├── XSharpWorkspaceIndex.cs            — in-memory symbol index built from source files
 │   ├── XSharpWorkspaceScanner.cs          — background scanner; populates the workspace index on startup and after saves
 │   ├── IndexSymbolExtractor.cs            — extracts symbols and identifier token locations from a parsed file
-│   ├── XSharpTypeResolver.cs              — local variable type inference for member completion
+│   ├── XSharpTypeResolver.cs              — local variable type inference + chained call return-type resolution
+│   ├── XSharpScopeHelper.cs               — shared scope utilities (enclosing function, locals, parameters, MEMVAR)
 │   ├── XSharpSemanticDiagnosticsService.cs — optional semantic analysis pass (argument counts, unknown calls)
 │   ├── XSharpDiagnosticsPublisher.cs      — pushes diagnostics to the client
 │   └── XSharpConfigurationService.cs      — workspace settings + XSharpParseOptions factory
@@ -100,7 +101,8 @@ XSharpLanguageServer/
 | `XSharpWorkspaceIndex` | `.Services` | In-memory index of all project symbols and per-file identifier token locations; primary lookup for all handlers |
 | `XSharpWorkspaceScanner` | `.Services` | Background service that parses all source files at startup and after each save; feeds `XSharpWorkspaceIndex` |
 | `IndexSymbolExtractor` | `.Services` | Extracts `WorkspaceSymbol` entries and identifier token locations from a single parsed file |
-| `XSharpTypeResolver` | `.Services` | Infers local variable types from assignments and member access chains for member completion |
+| `XSharpTypeResolver` | `.Services` | Infers local variable types from assignments and member access chains; resolves chained call return types via workspace index and DB assembly overloads |
+| `XSharpScopeHelper` | `.Services` | Shared static scope utilities: enclosing function discovery, local/parameter/MEMVAR classification; used by rename and code actions |
 | `XSharpSemanticDiagnosticsService` | `.Services` | Optional semantic analysis: wrong argument count, unknown call warnings; runs after each parse when enabled |
 | `XSharpConfigurationService` | `.Services` | Parses `workspace/didChangeConfiguration` payload; builds `XSharpParseOptions` from dialect, include paths, and preprocessor symbols |
 | `XSharpDiagnosticsPublisher` | `.Services` | Pushes errors/warnings to the client after each parse |

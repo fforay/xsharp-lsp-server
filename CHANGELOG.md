@@ -4,6 +4,32 @@ All notable changes to the XSharp Language Server will be documented in this fil
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [Unreleased]
+
+### Added
+- **Assembly member completion** — member completion after `.` / `:` now covers BCL and
+  NuGet types via .NET reflection (`XSharpDatabaseService.FindAssemblyMembersOf`).
+  A 30-entry XSharp-to-.NET alias map resolves language primitives (`STRING` →
+  `System.String`, `INT` → `System.Int32`, `LOGIC` → `System.Boolean`, etc.).
+  Results are cached indefinitely in a `ConcurrentDictionary`.
+- **Chained call member completion** — `GetFoo():Bar` now resolves the return type of
+  `GetFoo()` via the workspace index (step 5) and, for assembly-level callables, via
+  `XSharpDatabaseService.FindAssemblyOverloads` (step 6 in `XSharpTypeResolver`).
+- **`XSharpScopeHelper`** — new shared static utility class for parse-tree scope
+  operations: `FindEnclosingFunction`, `IsLocalOrParameter`, `CollectLocalsInRange`,
+  `CollectParameterNames`, `CollectClipperParameters`, `CollectPrivateMemvars`.
+  Used by `XSharpRenameHandler` and `XSharpCodeActionHandler`.
+
+### Improved
+- **Rename symbol — scope awareness** — `LOCAL`/`VAR` variables, signature parameters,
+  Clipper-style `PARAMETERS`, and `MEMVAR`/`PRIVATE` variables are now renamed only
+  within the enclosing function scope.  `PUBLIC` MEMVAR and all global symbols, types,
+  and members continue to be renamed project-wide.  Logged as `scope [N–M]` or
+  `project-wide` respectively.
+- **`XSharpCodeActionHandler`** — duplicate scope-walking logic (`WalkForFunc`,
+  `WalkLocals`, `CollectLocalsInRange`, `CollectLocalsBefore`) replaced with
+  delegation to `XSharpScopeHelper`.
+
 ## [0.6.0] - 2026-06-05
 
 ### Added
