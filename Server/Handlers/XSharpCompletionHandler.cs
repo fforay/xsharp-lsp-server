@@ -153,7 +153,8 @@ namespace XSharpLanguageServer.Handlers
                             parsed.Tree,
                             request.Position,
                             memberTypeName,
-                            _workspaceIndex) ?? memberTypeName;
+                            _workspaceIndex,
+                            _dbService) ?? memberTypeName;
                     }
 
                     // Member access: foo. or foo: → workspace index first, then assembly reflection

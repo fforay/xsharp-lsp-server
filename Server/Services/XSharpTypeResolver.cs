@@ -20,12 +20,16 @@ namespace XSharpLanguageServer.Services
     ///   <item>Field of the enclosing class with a matching name (implicit SELF).</item>
     ///   <item>Identifier is itself a known type name in the workspace index
     ///         (static / class reference).</item>
+    ///   <item>Identifier is a callable in the workspace index — return its declared
+    ///         return type (supports chained-call completion: <c>GetFoo():Bar</c>).</item>
+    ///   <item>Identifier is a callable from a referenced assembly — return type looked
+    ///         up via <see cref="XSharpDatabaseService.FindAssemblyOverloads"/>.</item>
     /// </list>
     /// </para>
     /// <para>
-    /// Known limitations: chained calls (<c>GetFoo():Bar</c>) are not resolved;
+    /// Known limitations:
     /// <c>VAR</c>/<c>DYNAMIC</c> locals are not resolved (no explicit type);
-    /// assembly-level type members are not available.
+    /// deeply nested chains (<c>A():B():C:</c>) resolve only the outermost call.
     /// </para>
     /// </summary>
     public static class XSharpTypeResolver
@@ -35,11 +39,16 @@ namespace XSharpLanguageServer.Services
         /// before the <c>.</c> or <c>:</c> trigger) to a type name.
         /// Returns <c>null</c> when resolution fails.
         /// </summary>
+        /// <param name="dbService">
+        /// Optional database service used as a fallback for assembly-level callables.
+        /// Pass <c>null</c> to skip assembly lookup (e.g. when DB is unavailable).
+        /// </param>
         public static string? Resolve(
             XSharpParserRuleContext tree,
             Position cursor,
             string rawIdentifier,
-            XSharpWorkspaceIndex workspaceIndex)
+            XSharpWorkspaceIndex workspaceIndex,
+            XSharpDatabaseService? dbService = null)
         {
             if (string.IsNullOrEmpty(rawIdentifier)) return null;
 
@@ -108,6 +117,23 @@ namespace XSharpLanguageServer.Services
                 //    Supports chained-call completion: GetFoo():Bar.
                 if (!string.IsNullOrEmpty(sym.ReturnType))
                     return CleanTypeName(sym.ReturnType);
+            }
+
+            // 6. Assembly-level callable fallback — covers functions from referenced
+            //    assemblies that are not in the workspace index.
+            if (dbService != null)
+            {
+                var assemblyOverloads = dbService.FindAssemblyOverloads(rawIdentifier);
+                if (assemblyOverloads.Count > 0)
+                {
+                    var returnType = CleanTypeName(assemblyOverloads[0].ReturnType);
+                    if (returnType != null) return returnType;
+                }
+
+                // Also check as a type name in referenced assemblies.
+                var assemblyType = dbService.FindAssemblyExact(rawIdentifier);
+                if (assemblyType != null && IsTypeKind(assemblyType.Kind))
+                    return rawIdentifier;
             }
 
             return null;
