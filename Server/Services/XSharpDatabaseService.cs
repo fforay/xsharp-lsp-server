@@ -560,14 +560,21 @@ namespace XSharpLanguageServer.Services
 
         /// <summary>
         /// Reflects public methods, properties, and fields from <paramref name="type"/>
-        /// and returns them as <see cref="WorkspaceSymbol"/> instances.
-        /// Special-name members (property accessors, event add/remove) are excluded.
+        /// — including inherited members up the base-class chain — and returns them
+        /// as <see cref="WorkspaceSymbol"/> instances.
+        /// Special-name members (property accessors, event add/remove) and members
+        /// declared on <see cref="object"/> (other than <c>ToString</c>) are excluded.
         /// </summary>
         private static IReadOnlyList<WorkspaceSymbol> ReflectMembers(Type type, string typeName)
         {
             var results = new List<WorkspaceSymbol>();
+            // FlattenHierarchy is required for inherited *static* members — instance
+            // members are already inherited without it. The Object-member filter
+            // below excludes the handful of extra Object statics it surfaces
+            // (Equals(object,object), ReferenceEquals).
             const BindingFlags flags =
-                BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static |
+                BindingFlags.FlattenHierarchy;
 
             // Assembly.Location returns empty string in single-file publish — use it
             // only as an informational label; navigation is not expected for BCL types.
