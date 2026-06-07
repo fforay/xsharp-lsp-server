@@ -156,15 +156,21 @@ namespace XSharpLanguageServer.Handlers
                             _workspaceIndex) ?? memberTypeName;
                     }
 
-                    // Member access: foo. or foo: → workspace index only
-                    // (no ReferencedMembers table in the DB)
+                    // Member access: foo. or foo: → workspace index first, then assembly reflection
                     foreach (var sym in _workspaceIndex.GetMembersOf(memberTypeName))
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         if (seen.Add(sym.Name))
                             items.Add(SymbolToCompletionItem(sym));
                     }
-                }
+
+                    // Assembly fallback: BCL / NuGet types via reflection (no DB required)
+                    foreach (var sym in _dbService.FindAssemblyMembersOf(memberTypeName))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (seen.Add(sym.Name))
+                            items.Add(SymbolToCompletionItem(sym));
+                    }                }
                 else if (prefix.Length >= 2)
                 {
                     // Prefix lookup — only activate for ≥2 chars to limit noise.

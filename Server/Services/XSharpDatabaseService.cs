@@ -1,8 +1,11 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Threading;
 using XSharpLanguageServer.Models;
 
@@ -400,6 +403,226 @@ namespace XSharpLanguageServer.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "FindAssemblyOverloads failed for '{Name}'", name);
+            }
+
+            return results;
+        }
+
+        // ====================================================================
+        // Assembly member reflection  (for member completion after . / :)
+        // ====================================================================
+
+        /// <summary>
+        /// Maps XSharp built-in type keywords to their .NET FullName equivalents
+        /// so that reflection-based member lookup works for language primitives.
+        /// </summary>
+        private static readonly Dictionary<string, string> _xsharpTypeMap =
+            new(StringComparer.OrdinalIgnoreCase)
+        {
+            { "STRING",   "System.String"  },
+            { "INT",      "System.Int32"   },
+            { "INT32",    "System.Int32"   },
+            { "LONG",     "System.Int32"   },
+            { "LONGINT",  "System.Int32"   },
+            { "DWORD",    "System.UInt32"  },
+            { "UINT32",   "System.UInt32"  },
+            { "WORD",     "System.UInt16"  },
+            { "UINT16",   "System.UInt16"  },
+            { "BYTE",     "System.Byte"    },
+            { "SHORTINT", "System.Int16"   },
+            { "INT16",    "System.Int16"   },
+            { "INT64",    "System.Int64"   },
+            { "UINT64",   "System.UInt64"  },
+            { "REAL4",    "System.Single"  },
+            { "SINGLE",   "System.Single"  },
+            { "REAL8",    "System.Double"  },
+            { "DOUBLE",   "System.Double"  },
+            { "FLOAT",    "System.Double"  },
+            { "LOGIC",    "System.Boolean" },
+            { "BOOL",     "System.Boolean" },
+            { "BOOLEAN",  "System.Boolean" },
+            { "CHAR",     "System.Char"    },
+            { "OBJECT",   "System.Object"  },
+            { "DYNAMIC",  "System.Object"  },
+        };
+
+        // Cache: XSharp type name (upper) → reflected members.
+        // Never evicted — assembly metadata is stable for the lifetime of the server.
+        private readonly ConcurrentDictionary<string, IReadOnlyList<WorkspaceSymbol>>
+            _memberCache = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Returns the public members (methods, properties, fields) of the .NET
+        /// type corresponding to <paramref name="typeName"/>, via reflection.
+        /// <para>
+        /// Resolution order:
+        /// <list type="number">
+        ///   <item>XSharp built-in type alias map (e.g. <c>STRING</c> → <c>System.String</c>).</item>
+        ///   <item><c>Type.GetType(typeName)</c> — covers fully-qualified BCL names.</item>
+        ///   <item>Search through all assemblies already loaded in the AppDomain.</item>
+        ///   <item>Load the assembly from the path recorded in <c>X#Model.xsdb</c> for
+        ///         this type (covers NuGet and project-referenced assemblies).</item>
+        /// </list>
+        /// Results are cached indefinitely (assembly metadata does not change while
+        /// the server is running).
+        /// </para>
+        /// </summary>
+        public IReadOnlyList<WorkspaceSymbol> FindAssemblyMembersOf(string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName))
+                return Array.Empty<WorkspaceSymbol>();
+
+            return _memberCache.GetOrAdd(typeName, name =>
+            {
+                var type = ResolveType(name);
+                return type != null
+                    ? ReflectMembers(type, name)
+                    : Array.Empty<WorkspaceSymbol>();
+            });
+        }
+
+        /// <summary>
+        /// Attempts to resolve a .NET <see cref="Type"/> for <paramref name="name"/>.
+        /// </summary>
+        private Type? ResolveType(string name)
+        {
+            // 1. XSharp keyword alias → fully-qualified .NET name
+            if (_xsharpTypeMap.TryGetValue(name, out var fullName))
+            {
+                var t = Type.GetType(fullName);
+                if (t != null) return t;
+            }
+
+            // 2. Try as-is (may already be a FullName like "System.Collections.Generic.List`1")
+            var direct = Type.GetType(name, throwOnError: false, ignoreCase: true);
+            if (direct != null) return direct;
+
+            // 3. Search already-loaded assemblies (covers most BCL + NuGet types)
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    var t = asm.GetType(name, throwOnError: false, ignoreCase: true);
+                    if (t != null) return t;
+                }
+                catch { /* some dynamic assemblies throw on GetType */ }
+            }
+
+            // 4. Look up the assembly file path from the DB and try loading it
+            var asmPath = FindAssemblyFileForType(name);
+            if (asmPath != null && File.Exists(asmPath))
+            {
+                try
+                {
+                    var asm = Assembly.LoadFrom(asmPath);
+                    // Try both the short name and fully-qualified name
+                    var t = asm.GetType(name, throwOnError: false, ignoreCase: true);
+                    if (t != null) return t;
+
+                    // Also search by short name (type may be in a namespace)
+                    return asm.GetTypes().FirstOrDefault(
+                        x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "FindAssemblyMembersOf: could not load assembly {Path}", asmPath);
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Queries the DB for the <c>AssemblyFileName</c> of the assembly that
+        /// contains <paramref name="typeName"/> (matched via <c>ReferencedTypes.Name</c>).
+        /// </summary>
+        private string? FindAssemblyFileForType(string typeName)
+        {
+            SqliteConnection? conn;
+            lock (_lock) { conn = _connection; }
+            if (conn == null) return null;
+
+            try
+            {
+                const string sql = @"
+                    SELECT a.AssemblyFileName
+                    FROM   ReferencedTypes rt
+                    JOIN   Assemblies a ON a.Id = rt.idAssembly
+                    WHERE  rt.Name = @name COLLATE NOCASE
+                    LIMIT  1";
+
+                using var cmd = new SqliteCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@name", typeName);
+                return cmd.ExecuteScalar() as string;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Reflects public methods, properties, and fields from <paramref name="type"/>
+        /// and returns them as <see cref="WorkspaceSymbol"/> instances.
+        /// Special-name members (property accessors, event add/remove) are excluded.
+        /// </summary>
+        private static IReadOnlyList<WorkspaceSymbol> ReflectMembers(Type type, string typeName)
+        {
+            var results = new List<WorkspaceSymbol>();
+            const BindingFlags flags =
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
+
+            // Assembly.Location returns empty string in single-file publish — use it
+            // only as an informational label; navigation is not expected for BCL types.
+#pragma warning disable IL3000
+            string asmLocation = type.Assembly.Location;
+#pragma warning restore IL3000
+
+            // Methods
+            foreach (var m in type.GetMethods(flags))
+            {
+                if (m.IsSpecialName) continue;   // skip get_X, set_X, add_X, remove_X
+                if (m.DeclaringType == typeof(object) && m.Name != "ToString") continue;
+
+                var paramStr = string.Join(", ",
+                    m.GetParameters().Select(p =>
+                        $"{p.Name} AS {p.ParameterType.Name}"));
+
+                results.Add(new WorkspaceSymbol
+                {
+                    Name       = m.Name,
+                    Kind       = XSharpSymbolKind.Method,
+                    ReturnType = m.ReturnType.Name,
+                    Sourcecode = $"METHOD {m.Name}({paramStr}) AS {m.ReturnType.Name}",
+                    FileName   = asmLocation,
+                    TypeName   = typeName,
+                });
+            }
+
+            // Properties
+            foreach (var p in type.GetProperties(flags))
+            {
+                results.Add(new WorkspaceSymbol
+                {
+                    Name       = p.Name,
+                    Kind       = XSharpSymbolKind.Property,
+                    ReturnType = p.PropertyType.Name,
+                    Sourcecode = $"PROPERTY {p.Name} AS {p.PropertyType.Name}",
+                    FileName   = asmLocation,
+                    TypeName   = typeName,
+                });
+            }
+
+            // Fields (public only, non-special)
+            foreach (var f in type.GetFields(flags))
+            {
+                if (f.IsSpecialName) continue;
+                results.Add(new WorkspaceSymbol
+                {
+                    Name       = f.Name,
+                    Kind       = XSharpSymbolKind.Field,
+                    ReturnType = f.FieldType.Name,
+                    Sourcecode = $"FIELD {f.Name} AS {f.FieldType.Name}",
+                    FileName   = asmLocation,
+                    TypeName   = typeName,
+                });
             }
 
             return results;
