@@ -21,22 +21,39 @@ namespace XSharpLanguageServer.Handlers
     /// <summary>
     /// Handles <c>textDocument/codeAction</c>.
     /// <para>
-    /// Currently offers one source action:
+    /// Offers the following actions:
     /// <list type="bullet">
     ///   <item>
     ///     <b>Fix all keyword casing</b> (<c>source.fixAll</c>) — scans every
     ///     keyword token in the open document and emits one
     ///     <see cref="TextEdit"/> per token whose text does not match the
-    ///     canonical UPPER-CASE spelling.  Indentation and all other content
-    ///     is untouched (unlike <c>textDocument/formatting</c>).
+    ///     configured <c>KeywordCase</c> setting.
+    ///   </item>
+    ///   <item>
+    ///     <b>Add USING namespace</b> (<c>quickfix</c>) — looks up the word
+    ///     under the cursor in <c>ReferencedTypes</c> in the assembly DB and,
+    ///     if a namespace is found, inserts a <c>USING</c> directive after the
+    ///     last existing <c>USING</c> line (or at the top of the file).
+    ///     Only offered when the DB is available and the namespace is not
+    ///     already imported.
+    ///   </item>
+    ///   <item>
+    ///     <b>Introduce variable</b> (<c>refactor.extract</c>) — wraps the
+    ///     selected single-line expression in a <c>LOCAL newVar := expr</c>
+    ///     declaration.
+    ///   </item>
+    ///   <item>
+    ///     <b>Extract to function / method</b> (<c>refactor.extract</c>) —
+    ///     moves the selected multi-line block into a new
+    ///     <c>FUNCTION</c> or <c>METHOD</c>, with parameters inferred from
+    ///     the locals and parameters used in the selection.
+    ///   </item>
+    ///   <item>
+    ///     <b>Inline variable</b> (<c>refactor.inline</c>) — replaces all
+    ///     usages of a <c>LOCAL foo := expr</c> variable within its scope
+    ///     with the initializer expression and removes the declaration.
     ///   </item>
     /// </list>
-    /// </para>
-    /// <para>
-    /// Planned but deferred: <b>Add USING namespace</b> — requires the
-    /// XSharp IntelliSense DB to expose a <c>Namespace</c> column on
-    /// <c>ReferencedTypes</c> so the correct namespace can be determined
-    /// from the type name at the cursor.
     /// </para>
     /// </summary>
     public class XSharpCodeActionHandler : CodeActionHandlerBase
@@ -525,81 +542,21 @@ namespace XSharpLanguageServer.Handlers
             out XSharpParserRuleContext? funcCtx,
             out XSharpParser.SignatureContext? sig)
         {
-            funcCtx = null;
-            sig     = null;
-            WalkForFunc(root, cursor, ref funcCtx, ref sig);
-        }
-
-        private static void WalkForFunc(
-            IParseTree node, Position cursor,
-            ref XSharpParserRuleContext? funcCtx,
-            ref XSharpParser.SignatureContext? sig)
-        {
-            if (node is not XSharpParserRuleContext ctx) return;
-
-            int startLine = ctx.Start != null ? Math.Max(0, ctx.Start.Line - 1) : 0;
-            int stopLine  = ctx.Stop  != null ? Math.Max(0, ctx.Stop.Line  - 1) : startLine;
-            if (cursor.Line < startLine || cursor.Line > stopLine) return;
-
-            switch (ctx)
-            {
-                case XSharpParser.FuncprocContext fp when fp.Sig != null:
-                    funcCtx = fp; sig = fp.Sig; break;
-                case XSharpParser.MethodContext m when m.Sig != null:
-                    funcCtx = m; sig = m.Sig; break;
-            }
-
-            for (int i = 0; i < node.ChildCount; i++)
-                WalkForFunc(node.GetChild(i), cursor, ref funcCtx, ref sig);
+            XSharpScopeHelper.FindEnclosingFunction(
+                root, cursor,
+                out funcCtx, out sig,
+                out _, out _);
         }
 
         // Collect LOCALs/VARs declared INSIDE [startLine..endLine].
         private static Dictionary<string, string?> CollectLocalsInRange(
             XSharpParserRuleContext? root, int startLine, int endLine)
-        {
-            var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-            if (root == null) return result;
-            WalkLocals(root, startLine, endLine, inclusive: true, result);
-            return result;
-        }
+            => XSharpScopeHelper.CollectLocalsInRange(root, startLine, endLine);
 
         // Collect LOCALs/VARs declared BEFORE startLine in the enclosing function.
         private static Dictionary<string, string?> CollectLocalsBefore(
             XSharpParserRuleContext? root, int startLine)
-        {
-            var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-            if (root == null) return result;
-            WalkLocals(root, 0, startLine - 1, inclusive: true, result);
-            return result;
-        }
-
-        private static void WalkLocals(
-            IParseTree node, int fromLine, int toLine, bool inclusive,
-            Dictionary<string, string?> result)
-        {
-            if (node is not XSharpParserRuleContext ctx) return;
-
-            if (ctx is XSharpParser.CommonLocalDeclContext decl && decl._LocalVars != null)
-            {
-                int dl = Math.Max(0, ctx.Start.Line - 1);
-                if (dl >= fromLine && dl <= toLine)
-                    foreach (var lv in decl._LocalVars)
-                        if (lv.Id != null)
-                            result.TryAdd(lv.Id.GetText(), lv.DataType?.GetText());
-            }
-
-            if (ctx is XSharpParser.VarLocalDeclContext varDecl && varDecl._ImpliedVars != null)
-            {
-                int dl = Math.Max(0, ctx.Start.Line - 1);
-                if (dl >= fromLine && dl <= toLine)
-                    foreach (var iv in varDecl._ImpliedVars)
-                        if (iv.Id != null)
-                            result.TryAdd(iv.Id.GetText(), null);  // VAR — type unknown → USUAL
-            }
-
-            for (int i = 0; i < node.ChildCount; i++)
-                WalkLocals(node.GetChild(i), fromLine, toLine, inclusive, result);
-        }
+            => XSharpScopeHelper.CollectLocalsInRange(root, 0, startLine - 1);
 
         private static Dictionary<string, string?> CollectFuncParams(
             XSharpParser.SignatureContext? sig)
