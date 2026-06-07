@@ -36,9 +36,18 @@ namespace XSharpLanguageServer.Services
     /// </list>
     /// </para>
     /// <para>
-    /// Known limitations: <c>VAR</c>/<c>DYNAMIC</c> locals are not resolved (no
-    /// explicit type); chain walking stops at the first segment whose member
-    /// cannot be found or whose return type is unknown.
+    /// <c>VAR</c>/<c>DYNAMIC</c> locals have no explicit type, so their type is
+    /// inferred from the initializer expression (see
+    /// <see cref="XSharpDatabaseService.FindAssemblyMembersOf"/> callers via
+    /// <c>FindLocalType</c> → <c>InferTypeFromExpression</c>): constructor calls,
+    /// call chains (<c>SELF:GetFoo():GetBar()</c>, with each segment's return type
+    /// feeding the next), and bare literals (<c>"abc"</c> → <c>STRING</c>,
+    /// <c>123</c> → <c>INT</c>, …). Plain-identifier initializers
+    /// (<c>VAR x := someOtherLocal</c>) are deliberately not resolved — doing so
+    /// would require re-entering local-variable lookup against the same cursor,
+    /// risking infinite recursion for self-referential / mutually-referential
+    /// declarations. Chain walking stops at the first segment whose member cannot
+    /// be found or whose return type is unknown.
     /// </para>
     /// </summary>
     public static class XSharpTypeResolver
@@ -136,7 +145,7 @@ namespace XSharpLanguageServer.Services
             // 2. LOCAL declarations in the function body, before the cursor.
             if (funcCtx != null)
             {
-                var localType = FindLocalType(funcCtx, cursor, rawIdentifier, workspaceIndex);
+                var localType = FindLocalType(funcCtx, cursor, rawIdentifier, workspaceIndex, dbService, tree);
                 if (localType != null) return localType;
             }
 
@@ -260,16 +269,20 @@ namespace XSharpLanguageServer.Services
             XSharpParserRuleContext funcCtx,
             Position cursor,
             string identifier,
-            XSharpWorkspaceIndex workspaceIndex)
+            XSharpWorkspaceIndex workspaceIndex,
+            XSharpDatabaseService? dbService,
+            XSharpParserRuleContext tree)
         {
-            return WalkForLocal(funcCtx, cursor, identifier, workspaceIndex);
+            return WalkForLocal(funcCtx, cursor, identifier, workspaceIndex, dbService, tree);
         }
 
         private static string? WalkForLocal(
             IParseTree node,
             Position cursor,
             string identifier,
-            XSharpWorkspaceIndex workspaceIndex)
+            XSharpWorkspaceIndex workspaceIndex,
+            XSharpDatabaseService? dbService,
+            XSharpParserRuleContext tree)
         {
             if (node is not XSharpParserRuleContext ctx) return null;
 
@@ -293,7 +306,8 @@ namespace XSharpLanguageServer.Services
                     // Initializer inference: LOCAL foo := SomeClass{} or := GetFoo().
                     if (lv.Expression != null)
                     {
-                        var inferred = InferTypeFromExpression(lv.Expression, workspaceIndex);
+                        var inferred = InferTypeFromExpression(
+                            lv.Expression, workspaceIndex, dbService, tree, cursor);
                         if (inferred != null) return inferred;
                     }
                 }
@@ -312,7 +326,8 @@ namespace XSharpLanguageServer.Services
 
                     if (iv.Expression != null)
                     {
-                        var inferred = InferTypeFromExpression(iv.Expression, workspaceIndex);
+                        var inferred = InferTypeFromExpression(
+                            iv.Expression, workspaceIndex, dbService, tree, cursor);
                         if (inferred != null) return inferred;
                     }
                 }
@@ -320,7 +335,7 @@ namespace XSharpLanguageServer.Services
 
             for (int i = 0; i < node.ChildCount; i++)
             {
-                var result = WalkForLocal(node.GetChild(i), cursor, identifier, workspaceIndex);
+                var result = WalkForLocal(node.GetChild(i), cursor, identifier, workspaceIndex, dbService, tree);
                 if (result != null) return result;
             }
 
@@ -332,45 +347,153 @@ namespace XSharpLanguageServer.Services
         /// <list type="bullet">
         ///   <item><c>CtorCallContext</c> — <c>SomeClass{}</c> or <c>SomeClass()</c>;
         ///         the type is read directly from <c>Type</c>.</item>
-        ///   <item><c>MethodCallContext</c> — <c>GetFoo()</c>; the return type of
-        ///         <c>GetFoo</c> is looked up in the workspace index.</item>
+        ///   <item><c>MethodCallContext</c> — <c>GetFoo()</c> or a deeper chain such
+        ///         as <c>SELF:GetFoo():GetBar()</c>; resolved segment by segment via
+        ///         <see cref="ResolveCallChainReturnType"/>.</item>
+        ///   <item>A bare literal (string, numeric, date, logic, …) — its XSharp
+        ///         type name is read directly from the token type.</item>
         /// </list>
         /// Returns <c>null</c> when the expression cannot be resolved.
+        /// <para>
+        /// Deliberately does <b>not</b> resolve plain identifiers by re-entering
+        /// local-variable lookup — doing so risks infinite recursion for
+        /// self-referential initializers (<c>LOCAL x := x:Foo()</c> shadowing an
+        /// outer <c>x</c>) since resolution always runs against the original
+        /// completion cursor, not the declaration's own position.
+        /// </para>
         /// </summary>
         private static string? InferTypeFromExpression(
             IParseTree node,
-            XSharpWorkspaceIndex workspaceIndex)
+            XSharpWorkspaceIndex workspaceIndex,
+            XSharpDatabaseService? dbService,
+            XSharpParserRuleContext tree,
+            Position cursor)
         {
             if (node is XSharpParser.CtorCallContext ctor)
                 return CleanTypeName(ctor.Type?.GetText());
 
             if (node is XSharpParser.MethodCallContext mc)
-            {
-                string callee = SimpleName(mc.Expr?.GetText() ?? string.Empty);
-                if (!string.IsNullOrEmpty(callee))
-                {
-                    var sym = workspaceIndex.FindExact(callee);
-                    return CleanTypeName(sym?.ReturnType);
-                }
-            }
+                return ResolveCallChainReturnType(
+                    mc.Expr?.GetText() ?? string.Empty, tree, cursor, workspaceIndex, dbService);
+
+            if (node is ITerminalNode term)
+                return LiteralTypeName(term.Symbol?.Type ?? -1);
 
             // Recurse into child nodes (e.g. PrimaryExpressionContext wrapper).
             for (int i = 0; i < node.ChildCount; i++)
             {
-                var result = InferTypeFromExpression(node.GetChild(i), workspaceIndex);
+                var result = InferTypeFromExpression(node.GetChild(i), workspaceIndex, dbService, tree, cursor);
                 if (result != null) return result;
             }
 
             return null;
         }
 
-        private static string SimpleName(string expr)
+        /// <summary>
+        /// Resolves the return type of a call chain such as <c>GetFoo</c>,
+        /// <c>SELF:GetFoo</c>, or <c>oObj:GetFoo():GetBar</c> — the receiver
+        /// expression of a <see cref="XSharpParser.MethodCallContext"/> (i.e. the
+        /// callee, without the final argument list).
+        /// <para>
+        /// The first segment is resolved via <see cref="ResolveChainReceiver"/>
+        /// (SELF/SUPER, known type names, or a callable's declared return type —
+        /// all flat lookups that cannot recurse into local-variable inference);
+        /// each following segment is looked up as a member of the
+        /// progressively-resolved type via <see cref="ResolveMemberType"/>.
+        /// </para>
+        /// </summary>
+        private static string? ResolveCallChainReturnType(
+            string chain,
+            XSharpParserRuleContext tree,
+            Position cursor,
+            XSharpWorkspaceIndex workspaceIndex,
+            XSharpDatabaseService? dbService)
         {
-            int colon = expr.LastIndexOf(':');
-            int dot   = expr.LastIndexOf('.');
-            int sep   = Math.Max(colon, dot);
-            return sep >= 0 ? expr[(sep + 1)..] : expr;
+            if (string.IsNullOrEmpty(chain)) return null;
+
+            var segments = SplitChain(chain);
+            if (segments.Count == 0) return null;
+
+            string firstName = SegmentName(segments[0]);
+            if (string.IsNullOrEmpty(firstName)) return null;
+
+            string? currentType = ResolveChainReceiver(firstName, tree, cursor, workspaceIndex);
+            if (currentType == null) return null;
+
+            for (int i = 1; i < segments.Count; i++)
+            {
+                string memberName = SegmentName(segments[i]);
+                if (string.IsNullOrEmpty(memberName)) return null;
+
+                currentType = ResolveMemberType(currentType, memberName, workspaceIndex, dbService);
+                if (currentType == null) return null;
+            }
+
+            return currentType;
         }
+
+        /// <summary>
+        /// Resolves the first segment of a call chain found inside an
+        /// initializer expression: <c>SELF</c>/<c>SUPER</c>, a known type name
+        /// (static reference), or a callable's declared return type.
+        /// Uses only flat <see cref="XSharpWorkspaceIndex.FindExact"/> lookups —
+        /// never re-enters local-variable resolution (see
+        /// <see cref="InferTypeFromExpression"/> for why).
+        /// </summary>
+        private static string? ResolveChainReceiver(
+            string name,
+            XSharpParserRuleContext tree,
+            Position cursor,
+            XSharpWorkspaceIndex workspaceIndex)
+        {
+            if (string.Equals(name, "SELF", StringComparison.OrdinalIgnoreCase))
+                return FindEnclosingClassName(tree, cursor);
+
+            if (string.Equals(name, "SUPER", StringComparison.OrdinalIgnoreCase))
+            {
+                var enclosing = FindEnclosingClassName(tree, cursor);
+                if (enclosing == null) return null;
+                var classSym = workspaceIndex.FindExact(enclosing);
+                return classSym?.InheritsFrom is { Length: > 0 } parent
+                    ? CleanTypeName(parent)
+                    : null;
+            }
+
+            var sym = workspaceIndex.FindExact(name);
+            if (sym == null) return null;
+
+            return IsTypeKind(sym.Kind) ? name : CleanTypeName(sym.ReturnType);
+        }
+
+        /// <summary>
+        /// Maps a literal token's lexer type to its XSharp type-keyword name
+        /// (e.g. <c>STRING_CONST</c> → <c>"STRING"</c>) so it can feed
+        /// <see cref="XSharpWorkspaceIndex.GetMembersOf"/> /
+        /// <see cref="XSharpDatabaseService.FindAssemblyMembersOf"/> for member
+        /// completion on bare-literal initializers (<c>VAR s := "abc"</c>).
+        /// Returns <c>null</c> for non-literal token types.
+        /// </summary>
+        private static string? LiteralTypeName(int tokenType) => tokenType switch
+        {
+            XSharpLexer.STRING_CONST
+                or XSharpLexer.ESCAPED_STRING_CONST
+                or XSharpLexer.INTERPOLATED_STRING_CONST
+                or XSharpLexer.TEXT_STRING_CONST
+                or XSharpLexer.BRACKETED_STRING_CONST
+                or XSharpLexer.INCOMPLETE_STRING_CONST => "STRING",
+            XSharpLexer.CHAR_CONST     => "CHAR",
+            XSharpLexer.SYMBOL_CONST   => "SYMBOL",
+            XSharpLexer.INT_CONST
+                or XSharpLexer.HEX_CONST
+                or XSharpLexer.BIN_CONST
+                or XSharpLexer.BINARY_CONST => "INT",
+            XSharpLexer.REAL_CONST     => "REAL8",
+            XSharpLexer.DATE_CONST     => "DATE",
+            XSharpLexer.DATETIME_CONST => "DATETIME",
+            XSharpLexer.TRUE_CONST
+                or XSharpLexer.FALSE_CONST => "LOGIC",
+            _ => null,
+        };
 
         // ====================================================================
         // Chain walking  (oObj:GetFoo():GetBar() → resolve segment by segment)
