@@ -160,7 +160,7 @@ The XSharp Visual Studio extension maintains a SQLite database (`X#Model.xsdb`) 
 ## Requirements
 
 - [XSharp Visual Studio Extension](https://www.xsharp.eu) installed (provides `XSharp.VSParser.dll`)
-- .NET 8 SDK
+- .NET 10 SDK
 
 The project references `XSharp.VSParser.dll` from the default extension install path:
 ```

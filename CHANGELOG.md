@@ -4,7 +4,7 @@ All notable changes to the XSharp Language Server will be documented in this fil
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
-## [Unreleased]
+## [0.6.5] - 2026-06-08
 
 ### Added
 - **Assembly member completion** — member completion after `.` / `:` now covers BCL and
