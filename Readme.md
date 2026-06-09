@@ -24,7 +24,7 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Signature help** — parameter hints for all overloads of a function call (`textDocument/signatureHelp`)
 - **Find references** — locates all usages across the entire project via the workspace token index (not limited to open documents); declaration sites also returned when requested (`textDocument/references`)
 - **Rename symbol** — renames every occurrence across all project files (open and closed) via the workspace index; scope-aware: `LOCAL`/`VAR` variables, parameters, `MEMVAR`/`PARAMETERS` (Clipper-style) are scoped to the enclosing function; global symbols, types, and members are renamed project-wide; `textDocument/prepareRename` validates the target before prompting (`textDocument/rename`)
-- **Document formatting** — uppercases all XSharp keywords to their canonical spelling and normalises indentation; handles sequential member declarations, single-line and multi-line PROPERTY forms, GET/SET accessor blocks, `DO CASE`/`SWITCH` two-level container/body model, multi-line continuation (`;`), and all `END` / `END X` terminator variants; uses client-supplied tab size / insert-spaces options; keyword map built automatically from `XSharpLexer` reflection (`textDocument/formatting`)
+- **Document formatting** — uppercases all XSharp keywords to their canonical spelling and normalises indentation; handles sequential member declarations, single-line and multi-line PROPERTY forms, GET/SET accessor blocks, `DO CASE`/`SWITCH` two-level container/body model, `DO WHILE` loops, VFP `DEFINE CLASS`/`ENDDEFINE`, access-modifier prefixes (`PUBLIC FUNCTION`, `PROTECTED METHOD`, …), multi-line continuation (`;`), and all `END` / `END X` terminator variants; re-lexes with stddefs suppressed so UDC expansions never corrupt the token stream; uses client-supplied tab size / insert-spaces options; keyword map built automatically from `XSharpLexer` reflection (`textDocument/formatting`)
 - **On-type formatting** — auto-indents the current line as structural keywords are completed (`textDocument/onTypeFormatting`)
 - **Formatting settings** — full set of indentation and keyword-casing options exposed as VS Code workspace settings: `IndentCaseLabel`, `IndentCaseContent`, `IndentBlockContent`, `IndentEntityContent`, `IndentFieldContent`, `IndentNamespace`, `IndentMultiLines`, `KeywordCase`, `TrimTrailingWhitespace`, `InsertFinalNewline`
 - **Code lens** — reference counts displayed above every declaration (`textDocument/codeLens`)
@@ -32,12 +32,13 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Workspace symbols** — symbol search across all project source files (`workspace/symbol`)
 - **Call hierarchy** — navigate callers and callees of any function or method; uses the workspace index for full-project search (`callHierarchy/prepare`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`)
 - **Code actions** — *Add USING*: inserts a missing `USING` directive; *Fix keyword casing*: corrects keyword case to match the configured `KeywordCase` setting (`textDocument/codeAction`)
-- **Configurable dialect, include paths, and preprocessor symbols** — read from `workspace/didChangeConfiguration`; changes trigger a full reparse
+- **Configurable dialect, include paths, preprocessor symbols, and standard definitions** — read from `workspace/didChangeConfiguration` (`xsharp.dialect`, `xsharp.includePaths`, `xsharp.preprocessorSymbols`, `xsharp.standardDefs`); changes trigger a full reparse; all options are passed directly to `XSharpParseOptions.FromVsValues` using the bare-name form required by the internal argument parser
+- **Project settings auto-detection** — on startup `XSharpWorkspaceScanner` reads the workspace `.xsproj` and extracts `<Dialect>`, `<IncludePaths>`, and `<StandardDefs>` as defaults for any field not already set by the client; FoxPro projects are typically configured automatically without manual VS Code settings
 - **Auto-reconnect to IntelliSense database** — a `FileSystemWatcher` monitors the `.vs/` subtree for `X#Model.xsdb` Created/Changed events and reconnects automatically when VS flushes a new copy or when the file first appears after startup
 
 ### Planned
 
-- Deeper type resolution — FOREACH variable types, `VAR`/`DYNAMIC` local inference
+- Deeper type resolution — FOREACH variable types
 
 ---
 
@@ -99,12 +100,12 @@ XSharpLanguageServer/
 | `XSharpDocumentService` | `.Services` | Central singleton: text buffer + parse cache (token stream, parse tree, diagnostics) per document; `FindTokenLocations()` shared helper |
 | `XSharpDatabaseService` | `.Services` | Read-only SQLite access to `X#Model.xsdb`; scoped to assembly-only symbols; `FileSystemWatcher` reconnects automatically when VS refreshes the file |
 | `XSharpWorkspaceIndex` | `.Services` | In-memory index of all project symbols and per-file identifier token locations; primary lookup for all handlers |
-| `XSharpWorkspaceScanner` | `.Services` | Background service that parses all source files at startup and after each save; feeds `XSharpWorkspaceIndex` |
+| `XSharpWorkspaceScanner` | `.Services` | Background service that parses all source files at startup and after each save; feeds `XSharpWorkspaceIndex`; reads `.xsproj` to auto-apply `<Dialect>`, `<IncludePaths>`, and `<StandardDefs>` as project defaults |
 | `IndexSymbolExtractor` | `.Services` | Extracts `WorkspaceSymbol` entries and identifier token locations from a single parsed file |
 | `XSharpTypeResolver` | `.Services` | Infers local variable types from assignments and member access chains; resolves chained call return types via workspace index and DB assembly overloads |
 | `XSharpScopeHelper` | `.Services` | Shared static scope utilities: enclosing function discovery, local/parameter/MEMVAR classification; used by rename and code actions |
 | `XSharpSemanticDiagnosticsService` | `.Services` | Optional semantic analysis: wrong argument count, unknown call warnings; runs after each parse when enabled |
-| `XSharpConfigurationService` | `.Services` | Parses `workspace/didChangeConfiguration` payload; builds `XSharpParseOptions` from dialect, include paths, and preprocessor symbols |
+| `XSharpConfigurationService` | `.Services` | Parses `workspace/didChangeConfiguration` payload; builds `XSharpParseOptions` from dialect, include paths, standard-defs header, and preprocessor symbols; `GetFormattingParseOptions()` returns options with stddefs suppressed for safe formatter re-lex |
 | `XSharpDiagnosticsPublisher` | `.Services` | Pushes errors/warnings to the client after each parse |
 | `XSharpTextDocumentSyncHandler` | `.Handlers` | Handles `didOpen/Change/Save/Close`, triggers re-parse and index update |
 | `XSharpSemanticTokensHandler` | `.Handlers` | Reads parse cache, maps tokens to LSP semantic token types |
@@ -131,7 +132,7 @@ XSharpLanguageServer/
 | `WorkspaceSymbol` | `.Models` | DTO for workspace index symbols |
 | `IdentifierLocation` | `.Models` | Token location entry in the per-file identifier map |
 | `XSharpSymbolKind` | `.Models` | Symbol kind enum used by the workspace index |
-| `XSharpWorkspaceSettings` | `.Models` | DTO for all workspace configuration settings |
+| `XSharpWorkspaceSettings` | `.Models` | DTO for all workspace configuration settings (dialect, include paths, standard-defs header, preprocessor symbols, indentation, keyword case, …) |
 
 ### Parse pipeline
 

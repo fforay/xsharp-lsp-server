@@ -4,6 +4,62 @@ All notable changes to the XSharp Language Server will be documented in this fil
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.6.6] - 2026-06-09
+
+### Added
+- **FoxPro dialect support — `StandardDefs` setting** — new `xsharp.standardDefs` workspace
+  setting (mirrors the `<StandardDefs>` MSBuild property and `/stddefs:` compiler switch).
+  The path is passed to `XSharpParseOptions.FromVsValues` so the XSharp preprocessor
+  automatically includes the nominated header file before every source file, enabling
+  project-level UDC definitions (`#command DO FORM`, `#command READ EVENTS`, etc.) to
+  suppress spurious `ERR_ParserError` diagnostics.
+- **Project settings auto-detection** — `XSharpWorkspaceScanner` now reads the first
+  `.xsproj` found in the workspace on startup and extracts `<StandardDefs>`, `<Dialect>`,
+  and `<IncludePaths>`. These values are applied as defaults for any field not already
+  set via `workspace/didChangeConfiguration`, so most FoxPro projects are correctly
+  configured without any manual VS Code settings.
+- **`XSharpConfigurationService.GetFormattingParseOptions()`** — returns parse options
+  with `nostddefs:true`, preventing the preprocessor from expanding UDC tokens during
+  formatting (see formatter fix below).
+
+### Fixed
+- **FoxPro dialect not applied** — `BuildOptions` was calling `FromVsValues` with a
+  leading `/` (e.g. `/dialect:FoxPro`).  `FromVsValues` extracts the name before `:`,
+  giving `/dialect`, which never matched `case "dialect":` in the internal argument
+  parser.  All option strings now use the bare form (`dialect:FoxPro`, `i:path`,
+  `d:SYM`), so the dialect, include paths, and preprocessor symbols are correctly
+  propagated to the VsParser.  As a result, the VsParser now calls `foxsource()` for
+  FoxPro files so `*`/`**`/`&&` are natively tokenised as `SL_COMMENT` on the hidden
+  channel — no coloring or diagnostic workarounds needed.
+- **Formatter — UDC expansion corrupts token stream** — when `stddefs` is active the
+  XSharp preprocessor replaces matched UDC tokens (e.g. `DO`, `FORM`) with
+  `UDC_KEYWORD` type tokens and injects expansion tokens into the raw lexer stream at
+  the same line number, causing the formatter to output `UDC_KEYWORD UDC_KEYWORD ...`.
+  The formatter now calls `VsParser.Lex` with `GetFormattingParseOptions()` (stddefs
+  suppressed) so the token stream is uncontaminated.
+- **Formatter — `DO FORM` / `DO <program>` incorrectly opened a block** — `DO` was
+  unconditionally in `_indentOpen`, causing `DO FORM formgrid1` to open an indent level
+  that was never closed, indenting all subsequent lines.  `DO` was removed from
+  `_indentOpen`; an explicit `isDoWhile` flag now opens a block only when `DO` is
+  followed by `WHILE`; `DO CASE` is still handled via the existing `isDoCaseOrSwitch`
+  path.
+- **Formatter — access modifiers before structural keywords** — lines beginning with
+  `PUBLIC FUNCTION`, `PROTECTED METHOD`, etc. had `firstReal = PUBLIC`, so structural
+  checks (`isCodeBlockHeader`, `isTypeOpener`, …) missed the actual command token.
+  `GetCommandToken()` now skips leading modifier tokens to find the first non-modifier
+  structural keyword.
+- **Formatter — VFP `DEFINE CLASS` / `ENDDEFINE` not recognised** — `DEFINE CLASS`
+  (VFP dialect type opener) and `ENDDEFINE` (type closer) are now handled alongside
+  `CLASS` / `ENDCLASS`.
+- **Formatter — indentation stripped when no structure detected** — the safety net now
+  preserves original leading whitespace and applies keyword casing only, instead of
+  calling `TrimStart()` which removed all indentation.
+- **Diagnostic message formatting** — `ErrorFacts.GetMessage` returns a bare fallback
+  string (e.g. `"message WRN_WarningDirective"`) for some codes.
+  `ErrorListener.BuildDiagnostic` now detects the absence of a `{0}` placeholder and
+  uses `args` directly as the message text, so `#warning` directives (e.g. from
+  `VFPCmd.xh`'s `__XPORTERWARNIN__`) display their actual content.
+
 ## [0.6.5] - 2026-06-08
 
 ### Added
