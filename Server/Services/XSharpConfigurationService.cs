@@ -144,20 +144,22 @@ namespace XSharpLanguageServer.Services
         {
             var args = new List<string>();
 
-            // Dialect — default to Core if blank or unrecognised.
-            args.Add($"/dialect:{NormaliseDialect(s.Dialect)}");
+            // FromVsValues strips the option at ':' and passes the left side as the
+            // switch name.  The internal ParseXSharpArgument switch uses bare names
+            // ("dialect", "i", "d"), so the args must NOT carry a leading '/'.
+            args.Add($"dialect:{NormaliseDialect(s.Dialect)}");
 
-            // Include paths — semicolon-separated list passed as /i:.
+            // Include paths — semicolon-separated list.
             if (!string.IsNullOrWhiteSpace(s.IncludePaths))
-                args.Add($"/i:{s.IncludePaths.Trim()}");
+                args.Add($"i:{s.IncludePaths.Trim()}");
 
-            // Preprocessor symbols — each one becomes a /d: argument.
+            // Preprocessor symbols — one "d:SYMBOL" entry each.
             if (!string.IsNullOrWhiteSpace(s.PreprocessorSymbols))
             {
                 foreach (var sym in s.PreprocessorSymbols
                     .Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries))
                 {
-                    args.Add($"/d:{sym.Trim()}");
+                    args.Add($"d:{sym.Trim()}");
                 }
             }
 

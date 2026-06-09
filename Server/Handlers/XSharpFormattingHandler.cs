@@ -107,6 +107,7 @@ namespace XSharpLanguageServer.Handlers
         private static readonly HashSet<int> _typeClosers = new()
         {
             XSharpLexer.ENDCLASS,
+            XSharpLexer.ENDDEFINE,   // VFP dialect: ENDDEFINE closes DEFINE CLASS
         };
 
         /// <summary>
@@ -149,6 +150,20 @@ namespace XSharpLanguageServer.Handlers
         private static readonly HashSet<int> _subBlockOpeners = new()
         {
             XSharpLexer.GET, XSharpLexer.SET,
+        };
+
+        /// <summary>
+        /// Access / visibility / modifier keywords that may appear before a code-block header
+        /// (e.g. PUBLIC FUNCTION, PROTECTED METHOD, STATIC CONSTRUCTOR).
+        /// <see cref="GetCommandToken"/> skips these to find the effective command keyword.
+        /// </summary>
+        private static readonly HashSet<int> _lineModifiers = new()
+        {
+            XSharpLexer.PUBLIC,    XSharpLexer.PRIVATE,  XSharpLexer.PROTECTED,
+            XSharpLexer.INTERNAL,  XSharpLexer.STATIC,   XSharpLexer.VIRTUAL,
+            XSharpLexer.OVERRIDE,  XSharpLexer.ABSTRACT, XSharpLexer.SEALED,
+            XSharpLexer.PARTIAL,   XSharpLexer.HIDDEN,   XSharpLexer.ASYNC,
+            XSharpLexer.UNSAFE,    XSharpLexer.NEW,
         };
 
         /// <summary>
@@ -207,19 +222,32 @@ namespace XSharpLanguageServer.Handlers
                 var uri = request.TextDocument.Uri;
 
                 if (!_documentService.TryGetText(uri, out var originalText))
+                {
+                    _logger.LogWarning("Formatting: no text cached for {Uri}", uri);
                     return Task.FromResult<TextEditContainer?>(null);
+                }
 
                 if (!_documentService.TryGetParsed(uri, out var parsed))
+                {
+                    _logger.LogWarning("Formatting: no parse result cached for {Uri}", uri);
                     return Task.FromResult<TextEditContainer?>(null);
+                }
 
                 if (parsed.TokenStream is not BufferedTokenStream stream)
+                {
+                    _logger.LogWarning("Formatting: TokenStream is {Type} (not BufferedTokenStream) for {Uri}",
+                        parsed.TokenStream?.GetType().FullName ?? "null", uri);
                     return Task.FromResult<TextEditContainer?>(null);
+                }
 
                 // Make sure all tokens including hidden-channel are available.
                 stream.Fill();
                 var allTokens = stream.GetTokens();
                 if (allTokens == null || allTokens.Count == 0)
+                {
+                    _logger.LogWarning("Formatting: token stream is empty for {Uri}", uri);
                     return Task.FromResult<TextEditContainer?>(null);
+                }
 
                 int  tabSize      = (int)(request.Options.TabSize > 0 ? request.Options.TabSize : 4);
                 bool insertSpaces = request.Options.InsertSpaces;
@@ -229,7 +257,10 @@ namespace XSharpLanguageServer.Handlers
                 string formatted = Format(originalText, allTokens, indentUnit, settings);
 
                 if (formatted == originalText)
-                    return Task.FromResult<TextEditContainer?>(null);   // nothing changed
+                {
+                    _logger.LogInformation("Formatting: no changes needed for {Uri}", uri);
+                    return Task.FromResult<TextEditContainer?>(null);
+                }
 
                 // Replace entire document.
                 var lines       = originalText.Split('\n');
@@ -286,8 +317,14 @@ namespace XSharpLanguageServer.Handlers
             foreach (var k in byLine.Keys)
                 if (k > maxLine) maxLine = k;
 
+            _logger.LogInformation(
+                "Formatting diagnostic: tokens={Tokens}, lines={Lines}, maxLine={MaxLine}",
+                tokens.Count, byLine.Count, maxLine);
+
             var sb              = new StringBuilder(originalText.Length);
             int  indentLevel    = 0;
+            int  maxIndentReached = 0;
+            int  codeBlockHeadersFound = 0;
             bool inMember       = false;  // true once a code-block header has been seen
             bool memberBodyOpen = false;  // true when indentLevel was incremented for that member
             bool typeBodyOpen   = false;  // true when CLASS/STRUCTURE/INTERFACE added an indent level
@@ -320,29 +357,40 @@ namespace XSharpLanguageServer.Handlers
                     { firstReal = t; break; }
                 }
 
-                bool isCodeBlockHeader  = firstReal != null && _codeBlockHeaders.Contains(firstReal.Type);
-                bool isTypeOpener       = firstReal != null && (
-                                              _typeOpeners.Contains(firstReal.Type) ||
-                                              (settings.IndentNamespace && firstReal.Type == XSharpLexer.NAMESPACE));
-                bool isTypeCloser       = firstReal != null && IsTypeCloser(firstReal, lineTokens, settings.IndentNamespace);
-                bool isCaseBranch       = firstReal != null &&
-                                          (firstReal.Type == XSharpLexer.CASE || firstReal.Type == XSharpLexer.OTHERWISE);
-                bool isEndCase          = firstReal != null && firstReal.Type == XSharpLexer.ENDCASE;
+                // Command token: first real token that is not a modifier keyword.
+                // e.g. for "PUBLIC METHOD Foo()" firstReal=PUBLIC, commandToken=METHOD.
+                IToken? commandToken = GetCommandToken(firstReal, lineTokens);
+
+                bool isCodeBlockHeader  = commandToken != null && _codeBlockHeaders.Contains(commandToken.Type);
+                if (isCodeBlockHeader) { codeBlockHeadersFound++; _logger.LogDebug("Formatting: code block header at line {Ln}: type={Type} text={Text}", ln, commandToken!.Type, commandToken.Text); }
+                if (firstReal != null && (ln <= 5 || isCodeBlockHeader || commandToken != firstReal))
+                    _logger.LogDebug("Formatting: line {Ln} firstReal type={Type} text={Text} channel={Ch} commandToken={Cmd}",
+                        ln, firstReal.Type, firstReal.Text, firstReal.Channel, commandToken?.Text ?? "(null)");
+                // DEFINE CLASS (VFP) is a type opener; also CLASS/INTERFACE/STRUCTURE.
+                bool isTypeOpener       = commandToken != null && (
+                                              _typeOpeners.Contains(commandToken.Type) ||
+                                              (settings.IndentNamespace && commandToken.Type == XSharpLexer.NAMESPACE) ||
+                                              (commandToken.Type == XSharpLexer.DEFINE &&
+                                               GetNextRealType(commandToken, lineTokens) == XSharpLexer.CLASS));
+                bool isTypeCloser       = commandToken != null && IsTypeCloser(commandToken, lineTokens, settings.IndentNamespace);
+                bool isCaseBranch       = commandToken != null &&
+                                          (commandToken.Type == XSharpLexer.CASE || commandToken.Type == XSharpLexer.OTHERWISE);
+                bool isEndCase          = commandToken != null && commandToken.Type == XSharpLexer.ENDCASE;
                 // DO CASE (DO followed by CASE) or SWITCH — open the case container.
-                bool isDoCaseOrSwitch   = firstReal != null &&
-                                          (firstReal.Type == XSharpLexer.SWITCH ||
-                                           (firstReal.Type == XSharpLexer.DO &&
-                                            GetNextRealType(firstReal, lineTokens) == XSharpLexer.CASE));
-                bool isEndMember        = !isTypeCloser && firstReal != null && IsEndMember(firstReal, lineTokens);
+                bool isDoCaseOrSwitch   = commandToken != null &&
+                                          (commandToken.Type == XSharpLexer.SWITCH ||
+                                           (commandToken.Type == XSharpLexer.DO &&
+                                            GetNextRealType(commandToken, lineTokens) == XSharpLexer.CASE));
+                bool isEndMember        = !isTypeCloser && commandToken != null && IsEndMember(commandToken, lineTokens);
                 bool isSubBlockEnd      = !isTypeCloser && !isEndMember
-                                          && firstReal != null && IsSubBlockEnd(firstReal, lineTokens);
+                                          && commandToken != null && IsSubBlockEnd(commandToken, lineTokens);
                 // Any remaining END + X: generic one-level close (e.g. END SWITCH).
                 bool isGenericEnd       = !isTypeCloser && !isEndMember && !isSubBlockEnd
-                                          && firstReal != null && firstReal.Type == XSharpLexer.END
-                                          && GetNextRealType(firstReal, lineTokens) != -1;
+                                          && commandToken != null && commandToken.Type == XSharpLexer.END
+                                          && GetNextRealType(commandToken, lineTokens) != -1;
                 // PROPERTY on one line with GET/SET/AUTO — member marker but no body block.
                 bool isSingleLineMember = isCodeBlockHeader
-                    && firstReal!.Type == XSharpLexer.PROPERTY
+                    && commandToken!.Type == XSharpLexer.PROPERTY
                     && LineContainsAny(lineTokens, _singleLinePropertyMarkers);
 
                 // ---- Adjust indent BEFORE writing ----
@@ -398,7 +446,7 @@ namespace XSharpLanguageServer.Handlers
                     }
                     // CASE is fully handled here — skip generic _indentClose below.
                 }
-                else if (firstReal != null && _indentClose.Contains(firstReal.Type))
+                else if (commandToken != null && _indentClose.Contains(commandToken.Type))
                 {
                     indentLevel = Math.Max(0, indentLevel - 1);
                 }
@@ -448,7 +496,7 @@ namespace XSharpLanguageServer.Handlers
                 }
                 else if (!isTypeCloser && !isEndMember && !isSubBlockEnd && !isGenericEnd
                          && !isEndCase
-                         && firstReal != null && _indentOpen.Contains(firstReal.Type))
+                         && commandToken != null && _indentOpen.Contains(commandToken.Type))
                 {
                     if (isTypeOpener)
                     {
@@ -468,9 +516,37 @@ namespace XSharpLanguageServer.Handlers
                         indentLevel++;
                     }
                 }
+                if (indentLevel > maxIndentReached) maxIndentReached = indentLevel;
             }
 
             string result = sb.ToString();
+
+            _logger.LogInformation(
+                "Formatting diagnostic: codeBlockHeaders={Headers}, maxIndent={MaxIndent}, origLen={OrigLen}, resultLen={ResultLen}",
+                codeBlockHeadersFound, maxIndentReached, originalText.Length, result.Length);
+
+            // Safety net: if no code structure was detected the indent engine set every
+            // line to level 0, stripping all existing indentation via TrimStart().
+            // Fall back to a keyword-casing-only pass that preserves the original whitespace.
+            if (codeBlockHeadersFound == 0 && maxIndentReached == 0)
+            {
+                _logger.LogWarning(
+                    "Formatting: no code structure detected — applying keyword casing only (indentation preserved)");
+                var sbKw = new StringBuilder(originalText.Length);
+                for (int ln2 = 1; ln2 <= maxLine; ln2++)
+                {
+                    string origLine2 = ln2 - 1 < origLines.Length
+                        ? origLines[ln2 - 1].TrimEnd('\r')
+                        : string.Empty;
+                    if (!byLine.TryGetValue(ln2, out var lt2) || lt2.Count == 0)
+                    { sbKw.Append(nl); continue; }
+                    string rebuilt = RebuildLine(origLine2, lt2, settings.KeywordCase);
+                    if (settings.TrimTrailingWhitespace) rebuilt = rebuilt.TrimEnd();
+                    sbKw.Append(rebuilt);
+                    if (ln2 < maxLine) sbKw.Append(nl);
+                }
+                result = sbKw.ToString();
+            }
 
             if (settings.InsertFinalNewline && !result.EndsWith(nl))
                 result += nl;
@@ -481,6 +557,32 @@ namespace XSharpLanguageServer.Handlers
         // ----------------------------------------------------------------
         // Helpers for type-close / member-end detection
         // ----------------------------------------------------------------
+
+        /// <summary>
+        /// Returns the first channel-0, non-comment, non-string token on the line that is
+        /// not a modifier keyword (PUBLIC, PRIVATE, STATIC, VIRTUAL, etc.).
+        /// <para>
+        /// For example, given tokens <c>PUBLIC VIRTUAL METHOD Foo()</c> the method returns
+        /// the METHOD token.  When <paramref name="firstReal"/> is already a non-modifier
+        /// (or is <c>null</c>) it is returned unchanged.
+        /// </para>
+        /// </summary>
+        private static IToken? GetCommandToken(IToken? firstReal, List<IToken> lineTokens)
+        {
+            if (firstReal == null || !_lineModifiers.Contains(firstReal.Type))
+                return firstReal;
+
+            bool past = false;
+            foreach (var t in lineTokens)
+            {
+                if (!past) { if (ReferenceEquals(t, firstReal)) past = true; continue; }
+                if (t.Channel != 0 || t.Type == -1) continue;
+                if (XSharpLexer.IsComment(t.Type) || XSharpLexer.IsString(t.Type)) continue;
+                if (_lineModifiers.Contains(t.Type)) continue;
+                return t;
+            }
+            return firstReal;   // fallback: all tokens were modifiers
+        }
 
         /// <summary>
         /// Returns true when <paramref name="firstReal"/> signals the end of a type block

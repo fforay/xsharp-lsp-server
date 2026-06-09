@@ -312,6 +312,18 @@ namespace XSharpLanguageServer.Services
 
                 var diagnostics = errorListener.Diagnostics;
 
+                // In FoxPro dialect, * / ** at line start and && anywhere are comment
+                // markers but the XSharp lexer does not convert them to comment tokens.
+                // Filter out parser errors that were generated inside these comment regions.
+                bool isFoxPro = _configService.GetSettings().Dialect
+                    .Equals("FoxPro", StringComparison.OrdinalIgnoreCase);
+                if (isFoxPro && diagnostics.Count > 0
+                    && tokenStream is LanguageService.SyntaxTree.BufferedTokenStream bts)
+                {
+                    bts.Fill();
+                    diagnostics = FilterVfpCommentDiagnostics(bts.GetTokens(), diagnostics);
+                }
+
                 // Semantic analysis pass (opt-in via xsharp.semanticDiagnostics).
                 IReadOnlyList<Diagnostic> allDiagnostics = diagnostics;
                 if (_semanticService != null
@@ -369,6 +381,68 @@ namespace XSharpLanguageServer.Services
                     _parsed[uri] = fallback;
                 }
             }
+        }
+
+        // ----------------------------------------------------------------
+        // VFP dialect helpers
+        // ----------------------------------------------------------------
+
+        /// <summary>
+        /// Removes diagnostics that fall inside VFP-style comment regions.
+        /// In FoxPro dialect the XSharp lexer leaves <c>*</c>, <c>**</c>, and <c>&amp;&amp;</c>
+        /// as operator tokens rather than converting the rest of the line to a comment token,
+        /// so the parser reports spurious errors for what is actually comment text.
+        /// </summary>
+        private static IReadOnlyList<Diagnostic> FilterVfpCommentDiagnostics(
+            IList<LanguageService.SyntaxTree.IToken> tokens,
+            IReadOnlyList<Diagnostic>                diagnostics)
+        {
+            // Build VFP comment regions: 1-based line → whole line OR start column.
+            var starLines = new HashSet<int>();
+            var andCols   = new Dictionary<int, int>();
+
+            int prevLn        = -1;
+            bool firstRealSeen = false;
+
+            foreach (var t in tokens)
+            {
+                int tt = t.Type;
+                if (tt == -1) continue;
+                if (t.Channel != 0) continue;
+
+                int ln = t.Line;
+                if (ln != prevLn) { prevLn = ln; firstRealSeen = false; }
+
+                if (!firstRealSeen && tt != XSharpLexer.EOS)
+                {
+                    firstRealSeen = true;
+                    if (tt == XSharpLexer.MULT || tt == XSharpLexer.EXP)
+                        starLines.Add(ln);
+                }
+
+                if (tt == XSharpLexer.AND && !starLines.Contains(ln))
+                    andCols.TryAdd(ln, t.Column);
+            }
+
+            if (starLines.Count == 0 && andCols.Count == 0)
+                return diagnostics;
+
+            var filtered = new List<Diagnostic>(diagnostics.Count);
+            foreach (var diag in diagnostics)
+            {
+                int lsLine = diag.Range.Start.Line;   // 0-based
+                int lexLine = lsLine + 1;              // 1-based
+
+                if (starLines.Contains(lexLine))
+                    continue;
+
+                if (andCols.TryGetValue(lexLine, out int andCol)
+                    && diag.Range.Start.Character >= andCol)
+                    continue;
+
+                filtered.Add(diag);
+            }
+            return filtered;
         }
 
         // ----------------------------------------------------------------

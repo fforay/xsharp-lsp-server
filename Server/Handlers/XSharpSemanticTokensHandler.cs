@@ -33,13 +33,16 @@ namespace XSharpLanguageServer.Handlers
     {
         private readonly ILogger<XSharpSemanticTokensHandler> _logger;
         private readonly XSharpDocumentService _documentService;
+        private readonly XSharpConfigurationService _configService;
 
         /// <summary>Initialises the handler. Called by the DI container.</summary>
         public XSharpSemanticTokensHandler(
             XSharpDocumentService documentService,
+            XSharpConfigurationService configService,
             ILogger<XSharpSemanticTokensHandler> logger)
         {
             _documentService = documentService;
+            _configService   = configService;
             _logger = logger;
         }
 
@@ -115,6 +118,45 @@ namespace XSharpLanguageServer.Handlers
                     "Tokenising {Uri}: {Count} tokens",
                     identifier.TextDocument.Uri, tokens.Count);
 
+                // In FoxPro dialect the lexer does not produce SL_COMMENT tokens for
+                // VFP-style comment starters.  Pre-compute which regions are comments:
+                //   * / ** at line start (first channel-0 non-EOS token) → whole line
+                //   && anywhere on the line → rest of line
+                bool isFoxPro = _configService.GetSettings().Dialect
+                    .Equals("FoxPro", StringComparison.OrdinalIgnoreCase);
+
+                var foxStarLines = new HashSet<int>();       // 1-based line numbers
+                var foxAndCols   = new Dictionary<int, int>(); // line → column of &&
+
+                if (isFoxPro)
+                {
+                    int prevLn = -1;
+                    bool firstRealSeen = false;
+                    foreach (var rawTok in tokens)
+                    {
+                        int tt = rawTok.Type;
+                        if (tt == -1) continue;                 // EOF
+                        if (rawTok.Channel != 0) continue;      // WS / hidden
+
+                        int ln = rawTok.Line;
+                        if (ln != prevLn)
+                        {
+                            prevLn = ln;
+                            firstRealSeen = false;
+                        }
+
+                        if (!firstRealSeen && tt != XSharpLexer.EOS)
+                        {
+                            firstRealSeen = true;
+                            if (tt == XSharpLexer.MULT || tt == XSharpLexer.EXP)
+                                foxStarLines.Add(ln);
+                        }
+
+                        if (tt == XSharpLexer.AND && !foxStarLines.Contains(ln))
+                            foxAndCols.TryAdd(ln, rawTok.Column);
+                    }
+                }
+
                 for (int i = 0; i < tokens.Count; i++)
                 {
                     // Respect client-side cancellation (e.g. user closes the file).
@@ -123,20 +165,15 @@ namespace XSharpLanguageServer.Handlers
                     var token = (XSharpToken)tokens[i];
                     string? tokenType = ClassifyToken(token);
 
-                    // FoxPro line-comment starters that the lexer emits as operator tokens
-                    // followed by SL_COMMENT for the rest of the line:
-                    //   *  → MULT  (single star at line start)
-                    //   ** → EXP   (double star at line start)
-                    //   && → FOX_AND (anywhere on the line)
-                    // Reclassify the operator token so the full comment is highlighted.
-                    if ((token.Type == XSharpLexer.MULT
-                            || token.Type == XSharpLexer.EXP
-                            || token.Type == XSharpLexer.FOX_AND)
-                        && i + 1 < tokens.Count
-                        && tokens[i + 1].Type == XSharpLexer.SL_COMMENT
-                        && tokens[i + 1].Line == token.Line)
+                    // Override classification for VFP-dialect comment regions.
+                    if (isFoxPro && token.Channel == 0 && token.Type != XSharpLexer.EOS)
                     {
-                        tokenType = SemanticTokenType.Comment;
+                        int ln = token.Line;
+                        if (foxStarLines.Contains(ln))
+                            tokenType = SemanticTokenType.Comment;
+                        else if (foxAndCols.TryGetValue(ln, out int andCol)
+                                 && token.Column >= andCol)
+                            tokenType = SemanticTokenType.Comment;
                     }
 
                     if (tokenType == null) continue;
