@@ -51,6 +51,21 @@ namespace XSharpLanguageServer.Services
         }
 
         /// <summary>
+        /// Returns parse options suitable for formatting: same as
+        /// <see cref="GetParseOptions"/> but with <c>nostddefs</c> forced on.
+        /// <para>
+        /// When <c>stddefs</c> is active the XSharp preprocessor expands UDC
+        /// tokens (e.g. <c>DO FORM</c>) and injects expansion tokens into the
+        /// raw lexer stream.  The formatter needs the unmodified token types to
+        /// reconstruct source lines correctly, so it must parse without stddefs.
+        /// </para>
+        /// </summary>
+        public XSharpParseOptions GetFormattingParseOptions()
+        {
+            lock (_lock) { return BuildOptions(_settings, noStdDefs: true); }
+        }
+
+        /// <summary>
         /// Returns a snapshot of the current workspace settings.
         /// </summary>
         public XSharpWorkspaceSettings GetSettings()
@@ -88,6 +103,7 @@ namespace XSharpLanguageServer.Services
                 {
                     Dialect             = xsharp["dialect"]?.Value<string>()             ?? GetSettings().Dialect,
                     IncludePaths        = xsharp["includePaths"]?.Value<string>()        ?? GetSettings().IncludePaths,
+                    StandardDefs        = xsharp["standardDefs"]?.Value<string>()        ?? GetSettings().StandardDefs,
                     PreprocessorSymbols = xsharp["preprocessorSymbols"]?.Value<string>() ?? GetSettings().PreprocessorSymbols,
                     SemanticDiagnostics  = xsharp["semanticDiagnostics"]?.Value<bool>()   ?? GetSettings().SemanticDiagnostics,
                     WarnOnUndefinedCalls = xsharp["warnOnUndefinedCalls"]?.Value<bool>() ?? GetSettings().WarnOnUndefinedCalls,
@@ -140,14 +156,21 @@ namespace XSharpLanguageServer.Services
         /// which accepts VS-style command-line option strings such as
         /// <c>/dialect:VO</c> and <c>/i:path1;path2</c>.
         /// </summary>
-        private static XSharpParseOptions BuildOptions(XSharpWorkspaceSettings s)
+        private static XSharpParseOptions BuildOptions(XSharpWorkspaceSettings s,
+                                                         bool noStdDefs = false)
         {
             var args = new List<string>();
 
             // FromVsValues strips the option at ':' and passes the left side as the
             // switch name.  The internal ParseXSharpArgument switch uses bare names
-            // ("dialect", "i", "d"), so the args must NOT carry a leading '/'.
+            // ("dialect", "i", "d", "stddefs"), so the args must NOT carry a leading '/'.
             args.Add($"dialect:{NormaliseDialect(s.Dialect)}");
+
+            // Standard definitions header — auto-included before every source file.
+            // Suppressed for formatting passes so UDC expansion does not contaminate
+            // the raw lexer token stream (see GetFormattingParseOptions).
+            if (!noStdDefs && !string.IsNullOrWhiteSpace(s.StandardDefs))
+                args.Add($"stddefs:{s.StandardDefs.Trim()}");
 
             // Include paths — semicolon-separated list.
             if (!string.IsNullOrWhiteSpace(s.IncludePaths))

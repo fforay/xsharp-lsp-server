@@ -24,6 +24,14 @@ namespace XSharpLanguageServer.Models
         public string IncludePaths { get; set; } = "";
 
         /// <summary>
+        /// Path to a header file that is automatically included before every source
+        /// file, equivalent to the <c>&lt;StandardDefs&gt;</c> property in an
+        /// <c>.xsproj</c> and the <c>/stddefs:</c> compiler switch.
+        /// When empty, no extra header is injected.
+        /// </summary>
+        public string StandardDefs { get; set; } = "";
+
+        /// <summary>
         /// Extra preprocessor symbols to define, separated by semicolons,
         /// e.g. <c>"DEBUG;MYFLAG"</c>.
         /// Defaults to empty.

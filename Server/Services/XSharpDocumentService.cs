@@ -502,10 +502,21 @@ namespace XSharpLanguageServer.Services
                     new Position(startLine, startChar),
                     new Position(startLine, startChar + 1));
 
-                // Format the message only if there are arguments to substitute.
-                string formattedMessage = args?.Length > 0
-                    ? string.Format(message, args)
-                    : message;
+                // Format the message.  Some XSharp error codes (e.g. WRN_WarningDirective)
+                // return a fallback string like "message WRN_WarningDirective" that has no
+                // {0} placeholder, so string.Format would ignore the args entirely.
+                // In that case, use the args directly as the message text.
+                string formattedMessage;
+                if (args?.Length > 0)
+                {
+                    formattedMessage = message.Contains('{')
+                        ? string.Format(message, args)
+                        : string.Join(" ", System.Array.ConvertAll(args, a => a?.ToString() ?? "")).Trim();
+                }
+                else
+                {
+                    formattedMessage = message;
+                }
 
                 return new Diagnostic
                 {

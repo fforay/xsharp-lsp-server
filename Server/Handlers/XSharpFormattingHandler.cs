@@ -1,3 +1,4 @@
+using LanguageService.CodeAnalysis.Text;
 using LanguageService.CodeAnalysis.XSharp.SyntaxParser;
 using LanguageService.SyntaxTree;
 using Microsoft.Extensions.Logging;
@@ -10,6 +11,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using XSharp.Parser;
 using XSharpLanguageServer.Services;
 
 namespace XSharpLanguageServer.Handlers
@@ -124,7 +126,9 @@ namespace XSharpLanguageServer.Handlers
         {
             XSharpLexer.CLASS,      XSharpLexer.INTERFACE,  XSharpLexer.STRUCTURE,
             XSharpLexer.IF,         XSharpLexer.ELSEIF,     XSharpLexer.ELSE,
-            XSharpLexer.DO,         XSharpLexer.FOR,        XSharpLexer.FOREACH,
+            // DO is handled specially: only DO WHILE opens a block (DO FORM / DO <prog> must not).
+            // DO CASE is handled via isDoCaseOrSwitch. DO WHILE is handled via isDoWhile.
+            XSharpLexer.FOR,        XSharpLexer.FOREACH,
             XSharpLexer.WHILE,      XSharpLexer.REPEAT,
             XSharpLexer.BEGIN,
             XSharpLexer.TRY,        XSharpLexer.CATCH,      XSharpLexer.FINALLY,
@@ -227,20 +231,22 @@ namespace XSharpLanguageServer.Handlers
                     return Task.FromResult<TextEditContainer?>(null);
                 }
 
-                if (!_documentService.TryGetParsed(uri, out var parsed))
+                // Re-lex with stddefs disabled so the preprocessor does not expand
+                // UDC tokens (DO FORM, READ EVENTS, …) and contaminate the token
+                // stream with UDC_KEYWORD + expansion tokens.  The formatter only
+                // needs raw keyword/identifier types to drive casing and indentation.
+                var formattingOptions = _configService.GetFormattingParseOptions();
+                string filePath = uri.GetFileSystemPath() ?? uri.ToString();
+                VsParser.Lex(originalText, filePath, formattingOptions,
+                             new NullErrorListener(),
+                             out var formattingStream, out _);
+
+                if (formattingStream is not BufferedTokenStream stream)
                 {
-                    _logger.LogWarning("Formatting: no parse result cached for {Uri}", uri);
+                    _logger.LogWarning("Formatting: lex did not return a BufferedTokenStream for {Uri}", uri);
                     return Task.FromResult<TextEditContainer?>(null);
                 }
 
-                if (parsed.TokenStream is not BufferedTokenStream stream)
-                {
-                    _logger.LogWarning("Formatting: TokenStream is {Type} (not BufferedTokenStream) for {Uri}",
-                        parsed.TokenStream?.GetType().FullName ?? "null", uri);
-                    return Task.FromResult<TextEditContainer?>(null);
-                }
-
-                // Make sure all tokens including hidden-channel are available.
                 stream.Fill();
                 var allTokens = stream.GetTokens();
                 if (allTokens == null || allTokens.Count == 0)
@@ -381,6 +387,11 @@ namespace XSharpLanguageServer.Handlers
                                           (commandToken.Type == XSharpLexer.SWITCH ||
                                            (commandToken.Type == XSharpLexer.DO &&
                                             GetNextRealType(commandToken, lineTokens) == XSharpLexer.CASE));
+                // DO WHILE opens a block (ENDDO closes it).
+                // Other DO forms (DO FORM, DO <program>, DO <prog> IN …) do NOT open a block.
+                bool isDoWhile          = commandToken != null &&
+                                          commandToken.Type == XSharpLexer.DO &&
+                                          GetNextRealType(commandToken, lineTokens) == XSharpLexer.WHILE;
                 bool isEndMember        = !isTypeCloser && commandToken != null && IsEndMember(commandToken, lineTokens);
                 bool isSubBlockEnd      = !isTypeCloser && !isEndMember
                                           && commandToken != null && IsSubBlockEnd(commandToken, lineTokens);
@@ -496,7 +507,8 @@ namespace XSharpLanguageServer.Handlers
                 }
                 else if (!isTypeCloser && !isEndMember && !isSubBlockEnd && !isGenericEnd
                          && !isEndCase
-                         && commandToken != null && _indentOpen.Contains(commandToken.Type))
+                         && commandToken != null
+                         && (_indentOpen.Contains(commandToken.Type) || isDoWhile || isDoCaseOrSwitch))
                 {
                     if (isTypeOpener)
                     {
@@ -731,6 +743,12 @@ namespace XSharpLanguageServer.Handlers
             var sb = new StringBuilder(level * unit.Length);
             for (int i = 0; i < level; i++) sb.Append(unit);
             return sb.ToString();
+        }
+
+        private sealed class NullErrorListener : VsParser.IErrorListener
+        {
+            public void ReportError(string f, LinePositionSpan s, string c, string m, object[] a) { }
+            public void ReportWarning(string f, LinePositionSpan s, string c, string m, object[] a) { }
         }
     }
 }

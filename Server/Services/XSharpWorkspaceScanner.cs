@@ -63,6 +63,11 @@ namespace XSharpLanguageServer.Services
             // Load <Compile Remove> exclusion patterns from all .xsproj files.
             var excludePatterns = LoadExcludePatterns(rootPath);
 
+            // Apply project-level settings derived from the .xsproj (dialect,
+            // include paths, standard defs) as defaults for any field the user
+            // has not explicitly set via workspace/didChangeConfiguration.
+            ApplyProjectSettings(rootPath);
+
             var files = SourceExtensions
                 .SelectMany(ext => Directory.EnumerateFiles(
                     rootPath, ext, SearchOption.AllDirectories))
@@ -130,6 +135,96 @@ namespace XSharpLanguageServer.Services
         // ====================================================================
         // Inner types
         // ====================================================================
+
+        // ====================================================================
+        // .xsproj project-settings helpers
+        // ====================================================================
+
+        /// <summary>
+        /// Reads the first <c>.xsproj</c> found under <paramref name="rootPath"/>,
+        /// extracts <c>&lt;StandardDefs&gt;</c>, <c>&lt;Dialect&gt;</c>, and
+        /// <c>&lt;IncludePaths&gt;</c>, then merges them into the config service
+        /// as defaults — only overwriting fields the user has not already set via
+        /// <c>workspace/didChangeConfiguration</c>.
+        /// </summary>
+        private void ApplyProjectSettings(string rootPath)
+        {
+            try
+            {
+                var proj = Directory.EnumerateFiles(rootPath, "*.xsproj",
+                    SearchOption.AllDirectories).FirstOrDefault();
+                if (proj == null) return;
+
+                var projDir = (Path.GetDirectoryName(proj) ?? rootPath)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+
+                var doc = XDocument.Load(proj);
+                string? Prop(string name) =>
+                    doc.Descendants()
+                       .FirstOrDefault(e => e.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                       ?.Value?.Trim();
+
+                // Resolve $(ProjectDir) / $(projectdir) MSBuild variable.
+                string Resolve(string? v) =>
+                    string.IsNullOrEmpty(v) ? "" :
+                    Regex.Replace(v, @"\$\(projectdir\)", projDir,
+                        RegexOptions.IgnoreCase).Trim();
+
+                string projStdDefs     = Resolve(Prop("StandardDefs"));
+                string projDialect     = Resolve(Prop("Dialect"));
+                string projIncludes    = Resolve(Prop("IncludePaths"));
+
+                if (string.IsNullOrEmpty(projStdDefs) && string.IsNullOrEmpty(projDialect)
+                    && string.IsNullOrEmpty(projIncludes))
+                    return;
+
+                var current = _configService.GetSettings();
+
+                // Only fill in fields the user has not already configured.
+                bool dialectOverride  = !string.IsNullOrEmpty(projDialect)
+                    && (string.IsNullOrEmpty(current.Dialect) || current.Dialect == "Core");
+                bool includesOverride = !string.IsNullOrEmpty(projIncludes)
+                    && string.IsNullOrEmpty(current.IncludePaths);
+                bool stdDefsOverride  = !string.IsNullOrEmpty(projStdDefs)
+                    && string.IsNullOrEmpty(current.StandardDefs);
+
+                if (!dialectOverride && !includesOverride && !stdDefsOverride) return;
+
+                var merged = new XSharpLanguageServer.Models.XSharpWorkspaceSettings
+                {
+                    Dialect             = dialectOverride  ? projDialect  : current.Dialect,
+                    IncludePaths        = includesOverride ? projIncludes : current.IncludePaths,
+                    StandardDefs        = stdDefsOverride  ? projStdDefs  : current.StandardDefs,
+                    PreprocessorSymbols = current.PreprocessorSymbols,
+                    SemanticDiagnostics  = current.SemanticDiagnostics,
+                    WarnOnUndefinedCalls = current.WarnOnUndefinedCalls,
+                    IndentCaseLabel         = current.IndentCaseLabel,
+                    IndentCaseContent       = current.IndentCaseContent,
+                    IndentBlockContent      = current.IndentBlockContent,
+                    IndentEntityContent     = current.IndentEntityContent,
+                    IndentFieldContent      = current.IndentFieldContent,
+                    IndentNamespace         = current.IndentNamespace,
+                    IndentMultiLines        = current.IndentMultiLines,
+                    IndentPreprocessorLines = current.IndentPreprocessorLines,
+                    KeywordCase             = current.KeywordCase,
+                    TrimTrailingWhitespace  = current.TrimTrailingWhitespace,
+                    InsertFinalNewline      = current.InsertFinalNewline,
+                };
+
+                _logger.LogInformation(
+                    "WorkspaceScanner: applying project defaults from {Proj} — " +
+                    "Dialect={D} StandardDefs={S} IncludePaths={I}",
+                    Path.GetFileName(proj),
+                    merged.Dialect, merged.StandardDefs, merged.IncludePaths);
+
+                _configService.Apply(merged);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "WorkspaceScanner: failed to read project settings");
+            }
+        }
 
         // ====================================================================
         // .xsproj exclusion helpers (step 19)
