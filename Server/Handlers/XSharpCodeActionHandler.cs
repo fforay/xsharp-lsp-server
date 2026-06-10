@@ -11,6 +11,7 @@ using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -172,6 +173,9 @@ namespace XSharpLanguageServer.Handlers
                             uri, text, filePath, request.Range.Start);
                         if (action != null) items.Add(new CommandOrCodeAction(action));
                     }
+
+                    // ── P3-2: Implement interface ─────────────────────────
+                    items.AddRange(ComputeImplementInterfaceActions(uri, text, request.Range.Start));
                 }
 
                 _logger.LogInformation(
@@ -489,6 +493,156 @@ namespace XSharpLanguageServer.Handlers
                     Changes = new Dictionary<DocumentUri, IEnumerable<TextEdit>> { [uri] = edits },
                 },
             };
+        }
+
+        // ── P3-2: Implement interface ─────────────────────────────────────────
+
+        /// <summary>
+        /// Offers one code action per interface in the enclosing class's IMPLEMENTS
+        /// clause that has members missing from the class body.  Inserts stub
+        /// implementations just before the END CLASS token.
+        /// </summary>
+        private IEnumerable<CommandOrCodeAction> ComputeImplementInterfaceActions(
+            DocumentUri uri, string text, Position cursor)
+        {
+            if (!_documentService.TryGetParsed(uri, out var parsed) || parsed.Tree == null)
+                yield break;
+
+            FindEnclosingClass(parsed.Tree, cursor, out var classCtx);
+            if (classCtx?.Id == null || classCtx.Stop == null
+                || classCtx._Implements == null || classCtx._Implements.Count == 0)
+                yield break;
+
+            string className = classCtx.Id.GetText();
+
+            // Collect the names already implemented by the class (name-only, case-insensitive).
+            var classMemberNames = new HashSet<string>(
+                _workspaceIndex.GetMembersOf(className).Select(m => m.Name),
+                StringComparer.OrdinalIgnoreCase);
+
+            // Detect indent of the class body from the source (first non-blank member line).
+            var lines = text.Split('\n');
+            int classStart = Math.Max(0, classCtx.Start.Line - 1);
+            int classStop  = Math.Max(0, classCtx.Stop.Line  - 1);
+            string memberIndent = DetectMemberIndent(lines, classStart, classStop);
+
+            string eol = text.Contains('\r') ? "\r\n" : "\n";
+            int insertLine = classStop;   // insert before END CLASS
+
+            foreach (var ifaceNode in classCtx._Implements)
+            {
+                string ifaceName = ifaceNode.GetText();
+                if (string.IsNullOrEmpty(ifaceName)) continue;
+
+                // Tier-1: workspace index (source-defined interfaces)
+                IReadOnlyList<Models.WorkspaceSymbol> ifaceMembers = _workspaceIndex.GetMembersOf(ifaceName);
+
+                // Tier-2: assembly reflection fallback
+                if (ifaceMembers.Count == 0 && _dbService.IsAvailable)
+                    ifaceMembers = _dbService.FindAssemblyMembersOf(ifaceName);
+
+                if (ifaceMembers.Count == 0) continue;
+
+                var missing = ifaceMembers
+                    .Where(m => m.Kind != XSharpSymbolKind.Constructor
+                             && m.Kind != XSharpSymbolKind.Destructor
+                             && !classMemberNames.Contains(m.Name))
+                    .ToList();
+
+                if (missing.Count == 0) continue;
+
+                var sb = new StringBuilder();
+                foreach (var m in missing)
+                    sb.Append(GenerateMemberStub(m, memberIndent, eol));
+
+                var edit = new TextEdit
+                {
+                    NewText = sb.ToString(),
+                    Range   = new LspRange(new Position(insertLine, 0), new Position(insertLine, 0)),
+                };
+
+                yield return new CommandOrCodeAction(new CodeAction
+                {
+                    Title = $"Implement interface '{ifaceName}' ({missing.Count} missing member(s))",
+                    Kind  = CodeActionKind.QuickFix,
+                    Edit  = new WorkspaceEdit
+                    {
+                        Changes = new Dictionary<DocumentUri, IEnumerable<TextEdit>>
+                        {
+                            [uri] = new[] { edit },
+                        },
+                    },
+                });
+            }
+        }
+
+        /// <summary>
+        /// Detects the indentation string used for class body members by scanning
+        /// for the first non-blank line inside the class range that is indented
+        /// more than the class declaration line itself.  Falls back to 3 spaces.
+        /// </summary>
+        private static string DetectMemberIndent(string[] lines, int classStart, int classStop)
+        {
+            string classDeclTrimmed = classStart < lines.Length
+                ? lines[classStart].TrimStart() : string.Empty;
+            int classIndentLen = classStart < lines.Length
+                ? lines[classStart].Length - classDeclTrimmed.Length : 0;
+
+            for (int i = classStart + 1; i < classStop && i < lines.Length; i++)
+            {
+                string line = lines[i];
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                int indentLen = line.Length - line.TrimStart().Length;
+                if (indentLen > classIndentLen)
+                    return line.Substring(0, indentLen);
+            }
+
+            return new string(' ', classIndentLen + 3);
+        }
+
+        /// <summary>
+        /// Generates an XSharp stub implementation for a single interface member.
+        /// </summary>
+        private static string GenerateMemberStub(Models.WorkspaceSymbol member, string indent, string eol)
+        {
+            string src = member.Sourcecode?.Trim() ?? string.Empty;
+            string bodyIndent = indent + "   ";
+
+            bool isProperty = member.Kind == XSharpSymbolKind.Property
+                || src.StartsWith("PROPERTY", StringComparison.OrdinalIgnoreCase);
+            bool isEvent = member.Kind == XSharpSymbolKind.Event
+                || src.StartsWith("EVENT", StringComparison.OrdinalIgnoreCase);
+
+            if (isEvent)
+            {
+                // Events are field-like declarations — just emit the declaration.
+                string decl = string.IsNullOrEmpty(src)
+                    ? $"EVENT {member.Name} AS EventHandler"
+                    : src;
+                return $"{indent}{decl}{eol}{eol}";
+            }
+
+            if (isProperty)
+            {
+                string retType = member.ReturnType ?? "OBJECT";
+                return
+                    $"{indent}PROPERTY {member.Name} AS {retType}{eol}" +
+                    $"{bodyIndent}GET{eol}" +
+                    $"{bodyIndent}   THROW NotImplementedException{{}}{eol}" +
+                    $"{bodyIndent}END GET{eol}" +
+                    $"{bodyIndent}SET{eol}" +
+                    $"{bodyIndent}   THROW NotImplementedException{{}}{eol}" +
+                    $"{bodyIndent}END SET{eol}" +
+                    $"{indent}END PROPERTY{eol}{eol}";
+            }
+
+            // Method, ACCESS, ASSIGN, or unknown — use the prototype as-is.
+            if (string.IsNullOrEmpty(src))
+                src = $"METHOD {member.Name}()";
+
+            return
+                $"{indent}{src}{eol}" +
+                $"{bodyIndent}THROW NotImplementedException{{}}{eol}{eol}";
         }
 
         // Finds the innermost Class_Context whose range contains the cursor.
