@@ -50,6 +50,17 @@ namespace XSharpLanguageServer.Services
     /// be found or whose return type is unknown.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Describes a LOCAL variable or function/method parameter found in scope,
+    /// used to build the hover card for that variable.
+    /// </summary>
+    public sealed record LocalVarHoverInfo(
+        string  Name,
+        string? ExplicitType,   // null when no AS clause (VAR / no-type LOCAL)
+        bool    IsVar,          // true for VAR / LOCAL IMPLIED declarations
+        bool    IsParam,        // true for function/method parameters
+        string? InferredType);  // non-null when IsVar=true and initializer was resolved
+
     public static class XSharpTypeResolver
     {
         /// <summary>
@@ -259,6 +270,118 @@ namespace XSharpLanguageServer.Services
 
             for (int i = 0; i < node.ChildCount; i++)
                 WalkForClassName(node.GetChild(i), cursor, ref result);
+        }
+
+        // ====================================================================
+        // Hover: local variable / parameter info
+        // ====================================================================
+
+        /// <summary>
+        /// Looks for a LOCAL variable declaration or function/method parameter named
+        /// <paramref name="identifier"/> that is in scope at <paramref name="cursor"/>.
+        /// Returns a <see cref="LocalVarHoverInfo"/> when found, or <c>null</c> when
+        /// no matching declaration exists in the current scope.
+        /// <para>
+        /// Unlike the completion-path <c>FindLocalType</c>, this method includes the
+        /// declaration line itself (<c>declLine &lt;= cursor.Line</c>) so that hovering
+        /// directly on the variable name inside its own declaration still works.
+        /// </para>
+        /// </summary>
+        public static LocalVarHoverInfo? FindLocalVarHover(
+            XSharpParserRuleContext  tree,
+            Position                 cursor,
+            string                   identifier,
+            XSharpWorkspaceIndex     workspaceIndex,
+            XSharpDatabaseService?   dbService = null)
+        {
+            FindEnclosingScope(tree, cursor, out var funcCtx, out var signature, out _);
+
+            // Check parameters first — they're always in scope inside the body.
+            if (signature?.ParamList?._Params != null)
+            {
+                foreach (var p in signature.ParamList._Params)
+                {
+                    if (p.Id == null) continue;
+                    if (!string.Equals(p.Id.GetText(), identifier,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+
+                    return new LocalVarHoverInfo(
+                        identifier,
+                        ExplicitType: CleanTypeName(p.Type?.GetText()),
+                        IsVar:    false,
+                        IsParam:  true,
+                        InferredType: null);
+                }
+            }
+
+            if (funcCtx == null) return null;
+            return WalkForLocalVarInfo(funcCtx, cursor, identifier, workspaceIndex, dbService, tree);
+        }
+
+        private static LocalVarHoverInfo? WalkForLocalVarInfo(
+            IParseTree             node,
+            Position               cursor,
+            string                 identifier,
+            XSharpWorkspaceIndex   workspaceIndex,
+            XSharpDatabaseService? dbService,
+            XSharpParserRuleContext tree)
+        {
+            if (node is not XSharpParserRuleContext ctx) return null;
+
+            int declLine = Math.Max(0, ctx.Start.Line - 1);
+
+            // LOCAL foo AS SomeType  /  LOCAL foo := expr
+            if (ctx is XSharpParser.CommonLocalDeclContext decl
+                && declLine <= cursor.Line      // <= so hovering on the declaration works
+                && decl._LocalVars != null)
+            {
+                foreach (var lv in decl._LocalVars)
+                {
+                    if (lv.Id == null) continue;
+                    if (!string.Equals(lv.Id.GetText(), identifier,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+
+                    var explicitType = CleanTypeName(lv.DataType?.GetText());
+                    if (explicitType != null)
+                        return new LocalVarHoverInfo(identifier, explicitType,
+                            IsVar: false, IsParam: false, InferredType: null);
+
+                    // No AS clause — try to infer from the initializer.
+                    string? inferred = lv.Expression != null
+                        ? InferTypeFromExpression(lv.Expression, workspaceIndex, dbService, tree, cursor)
+                        : null;
+                    return new LocalVarHoverInfo(identifier, ExplicitType: null,
+                        IsVar: true, IsParam: false, InferredType: inferred);
+                }
+            }
+
+            // VAR foo := expr  /  LOCAL IMPLIED foo := expr
+            if (ctx is XSharpParser.VarLocalDeclContext varDecl
+                && declLine <= cursor.Line
+                && varDecl._ImpliedVars != null)
+            {
+                foreach (var iv in varDecl._ImpliedVars)
+                {
+                    if (iv.Id == null) continue;
+                    if (!string.Equals(iv.Id.GetText(), identifier,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+
+                    string? inferred = iv.Expression != null
+                        ? InferTypeFromExpression(iv.Expression, workspaceIndex, dbService, tree, cursor)
+                        : null;
+                    return new LocalVarHoverInfo(identifier, ExplicitType: null,
+                        IsVar: true, IsParam: false, InferredType: inferred);
+                }
+            }
+
+            for (int i = 0; i < node.ChildCount; i++)
+            {
+                var result = WalkForLocalVarInfo(
+                    node.GetChild(i), cursor, identifier, workspaceIndex, dbService, tree);
+                if (result != null) return result;
+            }
+
+            return null;
         }
 
         // ====================================================================

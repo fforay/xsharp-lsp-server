@@ -8,8 +8,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 
-using XSharpLanguageServer.Services;
 using XSharpLanguageServer.Models;
+using XSharpLanguageServer.Services;
 namespace XSharpLanguageServer.Handlers
 {
     /// <summary>
@@ -244,7 +244,32 @@ namespace XSharpLanguageServer.Handlers
                 }
 
                 // ----------------------------------------------------------
-                // 2. Two-tier symbol lookup: workspace index then assembly DB.
+                // 2. Local variable / parameter — parse-tree walk.
+                //    Runs before symbol lookup so locals shadow global names.
+                // ----------------------------------------------------------
+                if (_documentService.TryGetParsed(uri, out var parsed) && parsed.Tree != null)
+                {
+                    var localInfo = XSharpTypeResolver.FindLocalVarHover(
+                        parsed.Tree, pos, word, _workspaceIndex,
+                        _dbService.IsAvailable ? _dbService : null);
+                    if (localInfo != null)
+                    {
+                        _logger.LogDebug("Hover: local/param '{Word}' type={Type}",
+                            word, localInfo.ExplicitType ?? localInfo.InferredType ?? "?");
+                        return Task.FromResult<Hover?>(new Hover
+                        {
+                            Contents = new MarkedStringsOrMarkupContent(new MarkupContent
+                            {
+                                Kind  = MarkupKind.Markdown,
+                                Value = BuildLocalVarMarkdown(localInfo),
+                            }),
+                            Range = wordRange,
+                        });
+                    }
+                }
+
+                // ----------------------------------------------------------
+                // 3. Two-tier symbol lookup: workspace index then assembly DB.
                 // ----------------------------------------------------------
                 string? filePath = uri.GetFileSystemPath();
 
@@ -395,6 +420,41 @@ namespace XSharpLanguageServer.Handlers
                 // Malformed XML — fall back to simple tag stripping.
                 return StripXmlTags(xml);
             }
+        }
+
+        /// <summary>
+        /// Builds a Markdown hover card for a LOCAL variable or function parameter.
+        /// </summary>
+        private static string BuildLocalVarMarkdown(LocalVarHoverInfo info)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("```xsharp");
+
+            if (info.IsParam)
+            {
+                sb.Append("PARAM ").Append(info.Name);
+                if (info.ExplicitType != null)
+                    sb.Append(" AS ").Append(info.ExplicitType);
+            }
+            else
+            {
+                // Show the effective type (explicit first, then inferred).
+                string? effectiveType = info.ExplicitType ?? info.InferredType;
+                sb.Append(info.IsVar ? "VAR " : "LOCAL ").Append(info.Name);
+                if (effectiveType != null)
+                    sb.Append(" AS ").Append(effectiveType);
+            }
+
+            sb.AppendLine().AppendLine("```").AppendLine();
+
+            if (info.IsParam)
+                sb.Append("*(parameter)*");
+            else if (info.InferredType != null && info.ExplicitType == null)
+                sb.Append("*(local variable — type inferred)*");
+            else
+                sb.Append("*(local variable)*");
+
+            return sb.ToString();
         }
 
         /// <summary>Removes all XML tags, leaving plain text. Used as fallback.</summary>
