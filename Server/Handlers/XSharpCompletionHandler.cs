@@ -120,6 +120,43 @@ namespace XSharpLanguageServer.Handlers
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                 // ----------------------------------------------------------------
+                // INHERIT / IMPLEMENTS context — filter to classes / interfaces only.
+                // Bypass all keyword, snippet, and general-symbol passes.
+                // ----------------------------------------------------------------
+                var inheritCtx = DetectInheritContext(request.TextDocument.Uri, request.Position);
+                if (inheritCtx != InheritContext.None && prefix.Length >= 1)
+                {
+                    int targetKind = inheritCtx == InheritContext.Inherit
+                        ? XSharpSymbolKind.Class
+                        : XSharpSymbolKind.Interface;
+
+                    foreach (var sym in _workspaceIndex.FindByPrefix(prefix))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (sym.Kind != targetKind) continue;
+                        if (seen.Add(sym.Name))
+                            items.Add(SymbolToCompletionItem(sym));
+                    }
+
+                    if (_dbService.IsAvailable)
+                    {
+                        foreach (var sym in _dbService.FindAssemblyByPrefix(prefix))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (sym.Kind != targetKind) continue;
+                            if (seen.Add(sym.Name))
+                                items.Add(SymbolToCompletionItem(sym));
+                        }
+                    }
+
+                    _logger.LogInformation(
+                        "Completion ({Ctx}): {Count} item(s) for prefix '{Prefix}'",
+                        inheritCtx, items.Count, prefix);
+
+                    return Task.FromResult(new CompletionList(items));
+                }
+
+                // ----------------------------------------------------------------
                 // 0. Snippets — added before keywords so snippet variants of
                 //    keywords (IF, FOR, CLASS, …) take priority in the list.
                 //    FilterText drives prefix matching for multi-word labels.
@@ -557,6 +594,62 @@ namespace XSharpLanguageServer.Handlers
                 "MessageBox.Show( ${1:\"Test\"} )$0");
 
             return items.ToImmutable();
+        }
+
+        // ====================================================================
+        // INHERIT / IMPLEMENTS context detection
+        // ====================================================================
+
+        private enum InheritContext { None, Inherit, Implements }
+
+        /// <summary>
+        /// Checks whether the cursor sits in an INHERIT or IMPLEMENTS clause on the
+        /// current line.  Strips the word being typed and any previously typed
+        /// comma-separated type names so that "CLASS Foo IMPLEMENTS IBar, |" is
+        /// correctly recognised as an IMPLEMENTS context.
+        /// </summary>
+        private InheritContext DetectInheritContext(DocumentUri uri, Position cursor)
+        {
+            if (!_documentService.TryGetText(uri, out var text))
+                return InheritContext.None;
+
+            var lines = text.Split('\n');
+            if (cursor.Line >= lines.Length) return InheritContext.None;
+
+            string line = lines[cursor.Line];
+            int col = Math.Min((int)cursor.Character, line.Length);
+
+            // Strip the word currently being typed.
+            int end = col;
+            while (end > 0 && IsWordChar(line[end - 1])) end--;
+            string before = line.Substring(0, end);
+
+            // Strip trailing comma-separated type/namespace identifiers.
+            // Each iteration removes one "  ,  TypeName" from the right.
+            while (true)
+            {
+                before = before.TrimEnd();
+                if (before.Length == 0) break;
+                if (before[before.Length - 1] != ',') break;
+
+                // Drop the comma, then the identifier before it.
+                before = before.Substring(0, before.Length - 1).TrimEnd();
+                int i = before.Length;
+                while (i > 0 && (IsWordChar(before[i - 1]) || before[i - 1] == '.')) i--;
+                before = before.Substring(0, i);
+            }
+
+            before = before.TrimEnd();
+            if (EndsWithKeyword(before, "INHERIT"))    return InheritContext.Inherit;
+            if (EndsWithKeyword(before, "IMPLEMENTS")) return InheritContext.Implements;
+            return InheritContext.None;
+        }
+
+        private static bool EndsWithKeyword(string text, string keyword)
+        {
+            if (!text.EndsWith(keyword, StringComparison.OrdinalIgnoreCase)) return false;
+            int offset = text.Length - keyword.Length;
+            return offset == 0 || (!char.IsLetterOrDigit(text[offset - 1]) && text[offset - 1] != '_');
         }
 
         // ====================================================================
