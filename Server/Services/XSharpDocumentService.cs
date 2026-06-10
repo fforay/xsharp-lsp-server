@@ -310,7 +310,8 @@ namespace XSharpLanguageServer.Services
                     out var tree,
                     out var includeFiles);
 
-                var diagnostics = errorListener.Diagnostics;
+                // VSPARSER-WORKAROUND: see ErrorListener.BuildDiagnostics for details.
+                var diagnostics = errorListener.BuildDiagnostics(text);
 
                 // In FoxPro dialect, * / ** at line start and && anywhere are comment
                 // markers but the XSharp lexer does not convert them to comment tokens.
@@ -454,64 +455,149 @@ namespace XSharpLanguageServer.Services
         /// accumulates errors and warnings reported by the XSharp lexer/parser and
         /// converts them into LSP <see cref="Diagnostic"/> objects.
         /// </summary>
+        /// <summary>
+        /// Collects raw VsParser error/warning callbacks and converts them to LSP
+        /// <see cref="Diagnostic"/> objects in a deferred <see cref="BuildDiagnostics"/>
+        /// call that has access to the source text.
+        /// <para>
+        /// The two-phase design exists because of a VSParser bug: <c>#warning</c>
+        /// directives emitted via chained UDC expansions in header files are reported
+        /// with the line number of the replacement token inside the header, not the
+        /// line of the original source token. Deferring conversion lets us search the
+        /// source text to recover the correct position.
+        /// VSPARSER-WORKAROUND — remove two-phase design once VSParser fix is applied.
+        /// VSParser fix: extend the position-adjustment loop in
+        /// XSharpPreprocessor.doNormalLine() to also cover Channel == PreProcessor
+        /// (currently only DefaultTokenChannel is adjusted, ~line 2466).
+        /// </para>
+        /// </summary>
         private sealed class ErrorListener : VsParser.IErrorListener
         {
             private readonly string _fileName;
-            private readonly List<Diagnostic> _diagnostics = new();
 
-            /// <summary>All diagnostics collected since this instance was created.</summary>
-            public IReadOnlyList<Diagnostic> Diagnostics => _diagnostics;
+            private readonly record struct RawEntry(
+                LinePositionSpan Span,
+                string ErrorCode,
+                string Message,
+                object[]? Args,
+                DiagnosticSeverity Severity);
+            private readonly List<RawEntry> _raw = new();
 
-            public ErrorListener(string fileName)
-            {
-                _fileName = fileName;
-            }
+            public ErrorListener(string fileName) { _fileName = fileName; }
 
-            /// <inheritdoc/>
             public void ReportError(string fileName, LinePositionSpan span,
                 string errorCode, string message, object[] args)
             {
-                _diagnostics.Add(BuildDiagnostic(
-                    span, errorCode, message, args, DiagnosticSeverity.Error));
+                if (!IsCurrentFile(fileName)) return;
+                _raw.Add(new RawEntry(span, errorCode, message, args, DiagnosticSeverity.Error));
             }
 
-            /// <inheritdoc/>
             public void ReportWarning(string fileName, LinePositionSpan span,
                 string errorCode, string message, object[] args)
             {
-                _diagnostics.Add(BuildDiagnostic(
-                    span, errorCode, message, args, DiagnosticSeverity.Warning));
+                if (!IsCurrentFile(fileName)) return;
+                _raw.Add(new RawEntry(span, errorCode, message, args, DiagnosticSeverity.Warning));
             }
 
+            private bool IsCurrentFile(string fileName) =>
+                string.IsNullOrEmpty(fileName) ||
+                string.Equals(fileName, _fileName, StringComparison.OrdinalIgnoreCase);
+
             /// <summary>
-            /// Converts a <see cref="LinePositionSpan"/> and error details into an
-            /// LSP <see cref="Diagnostic"/>.
+            /// Converts raw entries to LSP <see cref="Diagnostic"/> objects.
+            /// For <c>WRN_WarningDirective</c> entries whose reported line is beyond
+            /// the document, searches the source text for the original command using
+            /// the command text embedded in <c>args[0]</c>.
             /// </summary>
-            private static Diagnostic BuildDiagnostic(
-                LinePositionSpan span,
-                string errorCode,
-                string message,
-                object[] args,
-                DiagnosticSeverity severity)
+            public IReadOnlyList<Diagnostic> BuildDiagnostics(string sourceText)
             {
-                // XSharp lines are 1-based; LSP positions are 0-based.
-                int startLine = Math.Max(0, span.Line - 1);
-                int startChar = Math.Max(0, span.Column);
+                var lines     = sourceText.Split('\n');
+                int lineCount = lines.Length;
+                var result    = new List<Diagnostic>(_raw.Count);
 
+                foreach (var e in _raw)
+                {
+                    // XSharp lines are 1-based; LSP positions are 0-based.
+                    int line0 = Math.Max(0, e.Span.Line - 1);
+                    int col   = Math.Max(0, e.Span.Column);
+
+                    if (line0 >= lineCount)
+                    {
+                        // VSPARSER-WORKAROUND: position came from the header file.
+                        // For WRN_WarningDirective, args[0] is the raw #warning text:
+                        //   "ON SHUTDOWN clear events"" This command is not (yet) supported"
+                        // The first quoted string is the original source command — search for it.
+                        if (e.ErrorCode == "WRN_WarningDirective" && e.Args?.Length > 0)
+                        {
+                            var cmdText = ExtractFirstQuotedString(e.Args[0]?.ToString() ?? "");
+                            var found   = FindCommandInSource(lines, cmdText);
+                            (line0, col) = found ?? (0, 0);
+                        }
+                        else
+                        {
+                            (line0, col) = (0, 0);
+                        }
+                    }
+
+                    result.Add(MakeDiagnostic(line0, col, e.ErrorCode, e.Message, e.Args, e.Severity));
+                }
+                return result;
+            }
+
+            // Extract content between the first pair of double-quotes.
+            // e.g.  "ON SHUTDOWN clear events"" This ..."  →  "ON SHUTDOWN clear events"
+            private static string ExtractFirstQuotedString(string s)
+            {
+                s = s.Trim();
+                if (s.Length >= 2 && s[0] == '"')
+                {
+                    int end = s.IndexOf('"', 1);
+                    if (end > 0)
+                        return s.Substring(1, end - 1).Trim();
+                }
+                return s;
+            }
+
+            // Returns 0-based (line, col) of the first source line whose trimmed text
+            // starts with commandText (case-insensitive), or null if not found.
+            private static (int line, int col)? FindCommandInSource(string[] lines, string cmd)
+            {
+                if (string.IsNullOrWhiteSpace(cmd)) return null;
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    var trimmed = lines[i].TrimStart();
+                    if (trimmed.StartsWith(cmd, StringComparison.OrdinalIgnoreCase))
+                        return (i, lines[i].Length - trimmed.Length);
+                }
+                return null;
+            }
+
+            private static Diagnostic MakeDiagnostic(
+                int line0, int col,
+                string errorCode, string message, object[]? args, DiagnosticSeverity severity)
+            {
                 var range = new OmniSharp.Extensions.LanguageServer.Protocol.Models.Range(
-                    new Position(startLine, startChar),
-                    new Position(startLine, startChar + 1));
+                    new Position(line0, col),
+                    new Position(line0, col + 1));
 
-                // Format the message.  Some XSharp error codes (e.g. WRN_WarningDirective)
-                // return a fallback string like "message WRN_WarningDirective" that has no
-                // {0} placeholder, so string.Format would ignore the args entirely.
-                // In that case, use the args directly as the message text.
                 string formattedMessage;
                 if (args?.Length > 0)
                 {
-                    formattedMessage = message.Contains('{')
-                        ? string.Format(message, args)
-                        : string.Join(" ", System.Array.ConvertAll(args, a => a?.ToString() ?? "")).Trim();
+                    if (message.Contains('{'))
+                    {
+                        formattedMessage = string.Format(message, args);
+                    }
+                    else
+                    {
+                        // args[0] for WRN_WarningDirective is the raw concatenated #warning
+                        // text including surrounding quotes, e.g.:
+                        //   "ON SHUTDOWN clear events"" This command is not (yet) supported"
+                        // Remove all double-quotes for a clean message.
+                        formattedMessage = (args[0]?.ToString() ?? "")
+                            .Replace("\"", " ")
+                            .Replace("  ", " ")
+                            .Trim();
+                    }
                 }
                 else
                 {
@@ -520,11 +606,11 @@ namespace XSharpLanguageServer.Services
 
                 return new Diagnostic
                 {
-                    Range = range,
+                    Range    = range,
                     Severity = severity,
-                    Code = new DiagnosticCode(errorCode),
-                    Source = "xsharp",
-                    Message = formattedMessage
+                    Code     = new DiagnosticCode(errorCode),
+                    Source   = "xsharp",
+                    Message  = formattedMessage
                 };
             }
         }
