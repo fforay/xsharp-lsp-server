@@ -11,7 +11,7 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 ### Implemented
 
 - **Semantic syntax highlighting** — tokens classified into: keyword, type, modifier, macro (preprocessor directives), comment, string, number, operator, variable
-- **Diagnostics** — syntax errors and warnings from the XSharp parser are pushed to the editor as squiggly underlines (`textDocument/publishDiagnostics`)
+- **Diagnostics** — syntax errors and warnings from the XSharp parser are pushed to the editor as squiggly underlines (`textDocument/publishDiagnostics`); `#warning` directives emitted via UDC chains in header files (e.g. unsupported-command stubs) are remapped to the actual source line rather than the header line where the UDC replacement is defined
 - **Semantic diagnostics** — optional lightweight semantic analysis pass that publishes extra diagnostics (wrong argument count, unknown calls); controlled by `xsharp.semanticDiagnostics` and `xsharp.warnOnUndefinedCalls` workspace settings
 - **Document synchronization** — full incremental sync (open / change / save / close) with correct `\r\n` and `\n` line ending handling (`textDocument/didOpen`, `didChange`, `didSave`, `didClose`)
 - **File-system watch** — new and deleted source files trigger automatic index updates (`workspace/didChangeWatchedFiles`); `.prg`, `.prgx`, and `.ch` files are watched
@@ -44,13 +44,14 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 
 ## Architecture
 
-The server is built on [OmniSharp.Extensions.LanguageServer](https://github.com/OmniSharp/csharp-language-server-protocol) (v0.19.9) and targets **.NET 8**.
+The server is built on [OmniSharp.Extensions.LanguageServer](https://github.com/OmniSharp/csharp-language-server-protocol) (v0.19.9) and targets **.NET 10**.
 
 ### Project structure
 
 ```
 XSharpLanguageServer/
 ├── Program.cs               — server bootstrap, DI wiring, Serilog logging
+├── LspWindowSink.cs         — Serilog sink that forwards log events to the VS Code Output panel
 ├── Handlers/                — one file per LSP request/notification
 │   ├── XSharpTextDocumentSyncHandler.cs
 │   ├── XSharpSemanticTokensHandler.cs
@@ -97,6 +98,7 @@ XSharpLanguageServer/
 | Component | Namespace | Role |
 |---|---|---|
 | `Program.cs` | `XSharpLanguageServer` | Server bootstrap, DI wiring, Serilog logging |
+| `LspWindowSink` | `XSharpLanguageServer` | Serilog `ILogEventSink` that forwards `Information+` events to the client via `window/logMessage` |
 | `XSharpDocumentService` | `.Services` | Central singleton: text buffer + parse cache (token stream, parse tree, diagnostics) per document; `FindTokenLocations()` shared helper |
 | `XSharpDatabaseService` | `.Services` | Read-only SQLite access to `X#Model.xsdb`; scoped to assembly-only symbols; `FileSystemWatcher` reconnects automatically when VS refreshes the file |
 | `XSharpWorkspaceIndex` | `.Services` | In-memory index of all project symbols and per-file identifier token locations; primary lookup for all handlers |
@@ -172,11 +174,14 @@ C:\Program Files (x86)\XSharp\Extension\Project\XSharp.VSParser.dll
 
 ## Logging
 
-Set the environment variable `XSHARPLSP_LOG_PATH` to a directory path to enable file logging:
+Log messages (`Information` and above) are forwarded to the LSP client via
+`window/logMessage` and appear in **Output → X# Language Server** in VS Code.
+
+To also write a rolling daily log file, set the environment variable `XSHARPLSP_LOG_PATH`:
 
 ```
 set XSHARPLSP_LOG_PATH=C:\Logs
 ```
 
-A rolling daily log file `XSharpLSPServer.log` will be written to that directory.
-Without the variable, log output goes to the debug output only.
+A file `XSharpLSPServer.log` will be written to that directory (all levels including `Debug`).
+Without the variable, `Debug`-level output goes to the debugger output only.

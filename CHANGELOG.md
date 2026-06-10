@@ -4,6 +4,38 @@ All notable changes to the XSharp Language Server will be documented in this fil
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.6.7] - 2026-06-10
+
+### Fixed
+- **`#warning` directive position from UDC chains** — when a `#warning` is emitted via
+  chained UDC expansions defined in a header file (e.g. `__XPORTERWARNIN__` in `VFPCmd.xh`),
+  the VSParser preprocessor reports the warning at the line number of the replacement token
+  inside the header, not the original source line.  `ErrorListener` is now a two-phase
+  design: VsParser callbacks accumulate raw entries; `BuildDiagnostics(text)` converts them
+  after parsing with access to the full source text.  For out-of-range `WRN_WarningDirective`
+  entries the command text is extracted from `args[0]` (the first double-quoted segment of
+  the raw `#warning` text) and `FindCommandInSource` scans the source lines for a
+  case-insensitive `TrimStart` match, placing the squiggle on the actual command (e.g. line 8
+  `ON SHUTDOWN` instead of phantom line 47).  Falls back to `(0, 0)` when no match is found.
+  Any other out-of-range diagnostic is clamped to `(0, 0)` as a general safety net.
+- **`#warning` directive message formatting** — `WRN_WarningDirective` messages now have
+  all surrounding double-quote characters removed and collapsed spaces trimmed, producing
+  `ON SHUTDOWN clear events  This command is not (yet) supported` instead of the raw
+  `"ON SHUTDOWN clear events"" This command is not (yet) supported"`.
+- **Semantic tokens and code-action keyword casing re-lex with stddefs disabled** — both
+  handlers now call `VsParser.Lex` (stddefs off) directly instead of reading the cached
+  parse result, so UDC tokens such as `DO FORM` and `READ EVENTS` are never replaced by
+  `UDC_KEYWORD` expansion tokens and are correctly classified as keywords.  String token
+  classification adds Guard 1 (skip multi-line tokens — `VsParser.Parse`-path artefacts)
+  and Guard 2 (skip `INCOMPLETE_STRING_CONST`) to prevent incorrect string colouring.
+
+### Added
+- **Server log output in VS Code** — log messages (`Information` and above) are now
+  forwarded to the LSP client via `window/logMessage` and appear in the
+  *Output → X# Language Server* panel.  A new `LspWindowSink` Serilog sink is activated
+  once the OmniSharp server is built; messages emitted during startup are silently
+  discarded rather than blocking initialisation.
+
 ## [0.6.6] - 2026-06-09
 
 ### Added
@@ -152,7 +184,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ## [0.1.0] 
 
 ### Added
-- Initial release of the XSharp Language Server (OmniSharp / .NET 8, single-file `win-x64` executable)
+- Initial release of the XSharp Language Server (OmniSharp / .NET, single-file `win-x64` executable)
 - **Document sync** — open / change / close / save (`textDocument/didOpen`, `didChange`, `didClose`, `didSave`)
 - **Diagnostics** — syntax errors collected via `IErrorListener` and pushed as `textDocument/publishDiagnostics` after every parse
 - **Semantic tokens** — keyword, type, modifier, comment, string, number, macro, operator, variable categories
