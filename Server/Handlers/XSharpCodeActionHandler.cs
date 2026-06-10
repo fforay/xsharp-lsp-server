@@ -1,6 +1,8 @@
+using LanguageService.CodeAnalysis.Text;
 using LanguageService.CodeAnalysis.XSharp.SyntaxParser;
 using LanguageService.SyntaxTree;
 using LanguageService.SyntaxTree.Tree;
+using XSharp.Parser;
 using Microsoft.Extensions.Logging;
 using OmniSharp.Extensions.LanguageServer.Protocol;
 using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
@@ -758,6 +760,12 @@ namespace XSharpLanguageServer.Handlers
 
         private static bool IsIdentChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 
+        private sealed class NullErrorListener : VsParser.IErrorListener
+        {
+            public void ReportError(string f, LinePositionSpan s, string c, string m, object[] a) { }
+            public void ReportWarning(string f, LinePositionSpan s, string c, string m, object[] a) { }
+        }
+
         // ====================================================================
         // Keyword casing
         // ====================================================================
@@ -772,8 +780,18 @@ namespace XSharpLanguageServer.Handlers
         {
             var edits = new List<TextEdit>();
 
-            if (!_documentService.TryGetParsed(uri, out var parsed)) return edits;
-            if (parsed.TokenStream is not BufferedTokenStream stream) return edits;
+            if (!_documentService.TryGetText(uri, out var text)) return edits;
+
+            // Re-lex with stddefs disabled so the preprocessor does not replace
+            // UDC tokens (DO FORM, READ EVENTS, …) with UDC_KEYWORD type tokens —
+            // the same fix applied in XSharpFormattingHandler.
+            var formattingOptions = _configService.GetFormattingParseOptions();
+            string filePath = uri.GetFileSystemPath() ?? uri.ToString();
+            VsParser.Lex(text, filePath, formattingOptions,
+                         new NullErrorListener(),
+                         out var lexedStream, out _);
+
+            if (lexedStream is not BufferedTokenStream stream) return edits;
 
             stream.Fill();
             var tokens = stream.GetTokens();

@@ -1,3 +1,4 @@
+using LanguageService.CodeAnalysis.Text;
 using LanguageService.CodeAnalysis.XSharp.SyntaxParser;
 using LanguageService.SyntaxTree;
 using Microsoft.Extensions.Logging;
@@ -8,7 +9,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-
+using XSharp.Parser;
 using XSharpLanguageServer.Services;
 namespace XSharpLanguageServer.Handlers
 {
@@ -100,15 +101,27 @@ namespace XSharpLanguageServer.Handlers
         {
             try
             {
-                if (!_documentService.TryGetParsed(identifier.TextDocument.Uri, out var parsed)
-                    || parsed.TokenStream == null)
+                var uri = identifier.TextDocument.Uri;
+                if (!_documentService.TryGetText(uri, out var text))
                 {
-                    _logger.LogWarning("No parse result available for {Uri}", identifier.TextDocument.Uri);
+                    _logger.LogWarning("No text cached for {Uri}", uri);
                     return;
                 }
 
-                var stream = parsed.TokenStream as BufferedTokenStream;
+                // Re-lex with stddefs disabled so the preprocessor does not replace
+                // UDC tokens (DO FORM, READ EVENTS, …) with UDC_KEYWORD type tokens
+                // and inject expansion tokens — the same fix applied in the formatter
+                // and code-action keyword-casing handlers.
+                var lexOptions = _configService.GetFormattingParseOptions();
+                string filePath = uri.GetFileSystemPath() ?? uri.ToString();
+                VsParser.Lex(text, filePath, lexOptions,
+                             new NullErrorListener(),
+                             out var lexedStream, out _);
+
+                var stream = lexedStream as BufferedTokenStream;
                 if (stream == null) return;
+
+                stream.Fill();
 
                 // GetTokens() returns every token on every channel, including
                 // whitespace (hidden) and comments (hidden / XML doc channel).
@@ -243,7 +256,21 @@ namespace XSharpLanguageServer.Handlers
             // String literals in all XSharp flavours:
             // "plain", e"escaped", i"interpolated", [bracketed], c"char", 0h (binary), …
             if (XSharpLexer.IsString(type))
+            {
+                // Guard 1: multi-line token (text contains \n/\r) — VsParser artefact
+                // from incorrect \" escape handling via Parse path.  No valid X# single-line
+                // literal contains a newline.
+                if (token.Text != null && token.Text.IndexOfAny(new[] { '\r', '\n' }) >= 0)
+                    return null;
+                // Guard 2: INCOMPLETE_STRING_CONST — the lexer terminated the string at
+                // end-of-line without finding a closing quote (either the user is mid-type,
+                // or the lexer mis-tokenised `"\"` / `'\'` as an escape sequence).  Do not
+                // colour it: emitting this token would paint the rest of the line as a string
+                // even when the underlying cause is a VsParser bug.
+                if (type == XSharpLexer.INCOMPLETE_STRING_CONST)
+                    return null;
                 return SemanticTokenType.String;
+            }
 
             // Numeric, boolean, date/time, symbol, and null literal constants.
             if (XSharpLexer.IsLiteral(type))
@@ -259,6 +286,12 @@ namespace XSharpLanguageServer.Handlers
 
             // Whitespace, EOS, LINE_CONT, and other structural tokens — not coloured.
             return null;
+        }
+
+        private sealed class NullErrorListener : VsParser.IErrorListener
+        {
+            public void ReportError(string f, LinePositionSpan s, string c, string m, object[] a) { }
+            public void ReportWarning(string f, LinePositionSpan s, string c, string m, object[] a) { }
         }
     }
 }
