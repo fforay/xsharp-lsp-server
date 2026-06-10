@@ -134,6 +134,8 @@ namespace XSharpLanguageServer
                     .WithHandler<XSharpSignatureHelpHandler>()
                     // Configuration: workspace/didChangeConfiguration
                     .WithHandler<XSharpDidChangeConfigurationHandler>()
+                     // Document highlight: textDocument/documentHighlight (all occurrences in current file)
+                     .WithHandler<XSharpDocumentHighlightHandler>()
                      // References: textDocument/references (find all usages in open docs + DB declarations)
                      .WithHandler<XSharpReferencesHandler>()
                      // Rename: textDocument/rename (rename symbol across all project files)
