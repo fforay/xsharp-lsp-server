@@ -41,6 +41,10 @@ namespace XSharpLanguageServer
             // ----------------------------------------------------------------
             // Logging
             // ----------------------------------------------------------------
+            // Created before the server so it can be included in the Serilog pipeline.
+            // Activated via SetServer() after the OmniSharp server is built.
+            var lspSink = new LspWindowSink();
+
             // If XSHARPLSP_LOG_PATH is set, write a rolling daily log file there.
             // Otherwise fall back to Debug output only (visible in a debugger).
             var logPath = Environment.GetEnvironmentVariable("XSHARPLSP_LOG_PATH");
@@ -53,6 +57,7 @@ namespace XSharpLanguageServer
                     .Enrich.FromLogContext()
                     .WriteTo.File(logFile, rollingInterval: RollingInterval.Day)
                     .WriteTo.Debug()
+                    .WriteTo.Sink(lspSink, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information)
                     .CreateLogger();
                 Log.Information("Starting XSharp Language Server, log file: {LogFile}", logFile);
             }
@@ -62,6 +67,7 @@ namespace XSharpLanguageServer
                     .MinimumLevel.Debug()
                     .Enrich.FromLogContext()
                     .WriteTo.Debug()
+                    .WriteTo.Sink(lspSink, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information)
                     .CreateLogger();
                 Log.Information("Starting XSharp Language Server");
             }
@@ -185,6 +191,11 @@ namespace XSharpLanguageServer
 
             var semanticService = server.Services.GetRequiredService<XSharpSemanticDiagnosticsService>();
             docService.SetSemanticDiagnosticsService(semanticService);
+
+            // Activate the LSP window sink so subsequent log events appear in the
+            // VS Code Output panel ("X# Language Server" channel).
+            var facade = server.Services.GetRequiredService<ILanguageServerFacade>();
+            lspSink.SetServer(facade);
 
             // Block until the client sends shutdown + exit.
             await server.WaitForExit;
