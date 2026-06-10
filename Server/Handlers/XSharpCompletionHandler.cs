@@ -56,6 +56,13 @@ namespace XSharpLanguageServer.Handlers
         private static readonly ImmutableArray<CompletionItem> _keywordItems =
             BuildKeywordItems();
 
+        /// <summary>
+        /// Snippet completion items — one per LS snippet, built once at startup.
+        /// Added before keywords so snippet variants of keywords (IF, FOR, …) win.
+        /// </summary>
+        private static readonly ImmutableArray<CompletionItem> _snippetItems =
+            BuildSnippetItems();
+
         /// <summary>Initialises the handler. Called by the DI container.</summary>
         public XSharpCompletionHandler(
             XSharpDocumentService documentService,
@@ -111,6 +118,23 @@ namespace XSharpLanguageServer.Handlers
                 // that appears in keywords, in-file symbols, AND the DB is only
                 // emitted once (first occurrence wins, in priority order).
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // ----------------------------------------------------------------
+                // 0. Snippets — added before keywords so snippet variants of
+                //    keywords (IF, FOR, CLASS, …) take priority in the list.
+                //    FilterText drives prefix matching for multi-word labels.
+                // ----------------------------------------------------------------
+                foreach (var snippet in _snippetItems)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    string filterKey = snippet.FilterText ?? snippet.Label;
+                    if (prefix.Length == 0
+                        || filterKey.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (seen.Add(snippet.Label))
+                            items.Add(snippet);
+                    }
+                }
 
                 // ----------------------------------------------------------------
                 // 1. Keywords — filter by prefix (case-insensitive).
@@ -415,6 +439,124 @@ namespace XSharpLanguageServer.Handlers
             AddRange(XSharpParser.FIRST_TYPE,    XSharpParser.LAST_TYPE);
 
             return builder.ToImmutable();
+        }
+
+        // ====================================================================
+        // Snippet list — built once at startup, ported from LS .snippet files
+        // ====================================================================
+
+        private static ImmutableArray<CompletionItem> BuildSnippetItems()
+        {
+            var items = ImmutableArray.CreateBuilder<CompletionItem>();
+
+            void Add(string label, string filterText, string description, string insertText) =>
+                items.Add(new CompletionItem
+                {
+                    Label            = label,
+                    Kind             = CompletionItemKind.Snippet,
+                    Detail           = description,
+                    FilterText       = filterText,
+                    InsertText       = insertText,
+                    InsertTextFormat = InsertTextFormat.Snippet,
+                    SortText         = label,
+                });
+
+            // ── Control flow ─────────────────────────────────────────────────
+            Add("IF", "IF", "IF statement",
+                "IF ${1:true}\n   $0\nEND IF");
+
+            Add("IF ELSE", "IF", "IF ELSE statement",
+                "IF ${1:true}\n   $0\nELSE\n\nEND IF");
+
+            Add("IF ELSEIF", "IF", "IF ELSEIF ELSE statement",
+                "IF ${1:true}\n   $0\nELSEIF ${2:true}\n\nELSE\n\nEND IF");
+
+            Add("FOR", "FOR", "FOR loop",
+                "FOR ${1:i} := ${2:start} TO ${3:finish} STEP ${4:incr}\n   $0\nNEXT");
+
+            Add("FOR DOWNTO", "FOR", "FOR DOWNTO loop",
+                "FOR ${1:i} := ${2:start} DOWNTO ${3:finish} STEP ${4:incr}\n   $0\nNEXT");
+
+            Add("FOR UPTO", "FOR", "FOR UPTO loop",
+                "FOR ${1:i} := ${2:start} UPTO ${3:finish} STEP ${4:incr}\n   $0\nNEXT");
+
+            Add("FOREACH", "FOREACH", "FOREACH loop",
+                "FOREACH VAR ${1:item} IN ${2:Collection}\n   $0\nNEXT");
+
+            Add("DO WHILE", "DO", "DO WHILE loop",
+                "DO WHILE ${1:true}\n   $0\nENDDO");
+
+            Add("REPEAT", "REPEAT", "REPEAT UNTIL loop",
+                "REPEAT\n   $0\nUNTIL ${1:true}");
+
+            Add("DO CASE", "DO", "DO CASE statement",
+                "DO CASE\n   CASE $0\n\n   CASE\n\n   OTHERWISE\n\nEND CASE");
+
+            Add("SWITCH", "SWITCH", "SWITCH statement",
+                "SWITCH ${1:case_var}\n   CASE ${2:Value1}\n      $0\n   CASE ${3:Value2}\n   OTHERWISE\nEND SWITCH");
+
+            // ── Exception handling ────────────────────────────────────────────
+            Add("TRY CATCH", "TRY", "TRY CATCH block",
+                "TRY\n   $0\nCATCH ${1:e} AS ${2:System.Exception}\n\nEND TRY");
+
+            Add("TRY CATCH FINALLY", "TRYCF", "TRY CATCH FINALLY block",
+                "TRY\n   $0\nCATCH ${1:e} AS ${2:System.Exception}\n\nFINALLY\n\nEND TRY");
+
+            Add("TRY FINALLY", "TRYF", "TRY FINALLY block",
+                "TRY\n   $0\nFINALLY\n\nEND TRY");
+
+            Add("BEGIN SEQUENCE", "BEGIN", "BEGIN SEQUENCE block",
+                "BEGIN SEQUENCE\n   $0\nRECOVER USING ${1:oError}\n\nEND SEQUENCE");
+
+            // ── Type declarations ─────────────────────────────────────────────
+            Add("CLASS", "CLASS", "CLASS declaration",
+                "CLASS ${1:MyClass}\n   $0\n\n   CONSTRUCTOR()\n      RETURN\n\nEND CLASS");
+
+            Add("CLASS INHERIT", "CLASS", "CLASS INHERIT declaration",
+                "CLASS ${1:MyClass} INHERIT ${2:ParentClass}\n   $0\n\n   CONSTRUCTOR()\n      SUPER()\n      RETURN\n\nEND CLASS");
+
+            Add("INTERFACE", "INTERFACE", "INTERFACE declaration",
+                "INTERFACE ${1:IMyInterface}\n   $0\n\nEND INTERFACE");
+
+            Add("STRUCTURE", "STRUCTURE", "STRUCTURE declaration",
+                "STRUCTURE ${1:MyStruct}\n   $0\n\n   METHOD DoSomething() AS VOID\n      RETURN\n\nEND STRUCTURE");
+
+            Add("VOSTRUCT", "VOSTRUCT", "VO STRUCTURE declaration",
+                "VOSTRUCT ${1:MyStructure}\n   MEMBER ${2:M1} AS ${3:INT}\n   $0");
+
+            Add("PROPERTY", "PROPERTY", "PROPERTY declaration",
+                "PROPERTY ${1:MyProperty} AS ${2:OBJECT}\n   GET\n      RETURN $0\n   END GET\n   SET\n      // Use Value for the new value\n      RETURN\n   END SET\nEND PROPERTY");
+
+            // ── Preprocessor ──────────────────────────────────────────────────
+            Add("#region", "#region", "#region block",
+                "#region ${1:Name}\n   $0\n#endregion");
+
+            Add("#ifdef", "#ifdef", "#ifdef block",
+                "#ifdef ${1:Name}\n   $0\n#endif");
+
+            Add("#ifndef", "#ifndef", "#ifndef block",
+                "#ifndef ${1:Name}\n   $0\n#endif");
+
+            // ── Utility / special ─────────────────────────────────────────────
+            Add("start", "start", "FUNCTION Start()",
+                "FUNCTION Start( cmdLineArgs AS STRING[] ) AS INT\n   LOCAL exitCode AS INT\n   $0\n   RETURN exitCode");
+
+            Add("initproc", "initproc", "INIT procedure",
+                "PROCEDURE ${1:MyInitProc}() AS VOID _INIT3\n   $0\nRETURN");
+
+            Add("exitproc", "exitproc", "EXIT procedure",
+                "PROCEDURE ${1:MyExitProc}() AS VOID EXIT\n   $0\nRETURN");
+
+            Add("nunit", "nunit", "NUnit test class",
+                "[TestFixture, Category( \"${1:TestCategory}\" ) ];\nCLASS ${2:TestClass}\n\n   [Test];\n   METHOD Test1() AS VOID\n      $0\n      RETURN\n\nEND CLASS");
+
+            Add("fhdr", "fhdr", "File header comment",
+                "/*//////////////////////////////////////////////////////////////////////////////\n*\n* File: $0\n* Created:\n* Created by:\n* Description:\n*\n*/");
+
+            Add("mbox", "mbox", "MessageBox.Show()",
+                "MessageBox.Show( ${1:\"Test\"} )$0");
+
+            return items.ToImmutable();
         }
 
         // ====================================================================
