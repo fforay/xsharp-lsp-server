@@ -182,7 +182,7 @@ namespace XSharpLanguageServer.Handlers
                 .Where(p => p.len > 0)
                 .Select(p => new DocumentHighlight
                 {
-                    Kind  = DocumentHighlightKind.Text,
+                    Kind  = DocumentHighlightKind.Write,   // Write = strong highlight (keyword pair)
                     Range = new OmniSharp.Extensions.LanguageServer.Protocol.Models.Range(
                         new Position(p.line0, p.col),
                         new Position(p.line0, p.col + p.len)),
