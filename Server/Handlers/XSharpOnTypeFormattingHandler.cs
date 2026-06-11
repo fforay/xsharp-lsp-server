@@ -5,6 +5,8 @@ using OmniSharp.Extensions.LanguageServer.Protocol.Document;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using System;
 using System.Collections.Generic;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using XSharpLanguageServer.Services;
@@ -90,6 +92,7 @@ namespace XSharpLanguageServer.Handlers
             {
                 DocumentSelector      = TextDocumentSelector.ForLanguage("xsharp"),
                 FirstTriggerCharacter = "\n",
+                MoreTriggerCharacter  = new Container<string>("/"),
             };
 
         /// <inheritdoc/>
@@ -103,13 +106,17 @@ namespace XSharpLanguageServer.Handlers
                 if (!_documentService.TryGetText(uri, out var text))
                     return Task.FromResult<TextEditContainer?>(null);
 
+                var lines = text.Split('\n');
+
+                if (request.Character == "/")
+                    return HandleXmlDocSlash(lines, (int)request.Position.Line);
+
                 // The newline was just inserted, so position.Line is the NEW
                 // empty line; the completed line is one above.
                 int completedLine = (int)request.Position.Line - 1;
                 if (completedLine < 0)
                     return Task.FromResult<TextEditContainer?>(null);
 
-                var lines = text.Split('\n');
                 if (completedLine >= lines.Length)
                     return Task.FromResult<TextEditContainer?>(null);
 
@@ -173,6 +180,155 @@ namespace XSharpLanguageServer.Handlers
                 _logger.LogError(ex, "OnTypeFormatting failed for {Uri}", request.TextDocument.Uri);
                 return Task.FromResult<TextEditContainer?>(null);
             }
+        }
+
+        // ====================================================================
+        // XML doc comment scaffolding  (triggered by the third '/')
+        // ====================================================================
+
+        private static readonly string[] _memberKeywords =
+        [
+            "FUNCTION", "PROCEDURE", "METHOD", "ACCESS", "ASSIGN",
+            "CONSTRUCTOR", "DESTRUCTOR", "PROPERTY",
+        ];
+
+        private static readonly string[] _modifiers =
+        [
+            "PUBLIC", "PROTECTED", "PRIVATE", "INTERNAL", "STATIC", "VIRTUAL",
+            "OVERRIDE", "ABSTRACT", "SEALED", "PARTIAL", "HIDDEN", "ASYNC", "UNSAFE", "NEW",
+        ];
+
+        private static readonly Regex _asTypeRegex =
+            new Regex(@"\bAS\s+([\w:]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private Task<TextEditContainer?> HandleXmlDocSlash(string[] lines, int currentLine)
+        {
+            if (currentLine >= lines.Length)
+                return Task.FromResult<TextEditContainer?>(null);
+
+            string rawLine = lines[currentLine].TrimEnd('\r');
+            string trimmed = rawLine.TrimStart();
+
+            // Must be exactly "///" — not a longer comment or a division expression.
+            if (!string.Equals(trimmed, "///", StringComparison.Ordinal))
+                return Task.FromResult<TextEditContainer?>(null);
+
+            // Skip if the previous line already starts a doc block.
+            if (currentLine > 0
+                && lines[currentLine - 1].TrimEnd('\r').TrimStart()
+                       .StartsWith("///", StringComparison.Ordinal))
+                return Task.FromResult<TextEditContainer?>(null);
+
+            // Find the first non-empty line below (the member declaration).
+            string? memberLine = null;
+            for (int i = currentLine + 1; i < lines.Length; i++)
+            {
+                string t = lines[i].TrimEnd('\r');
+                if (t.Trim().Length > 0) { memberLine = t; break; }
+            }
+
+            string indent = rawLine[..(rawLine.Length - trimmed.Length)];
+            var (keyword, paramNames, returnType) = ParseMemberSignature(memberLine ?? "");
+
+            // Build the stub.
+            var sb = new StringBuilder();
+            sb.Append(indent).Append("/// <summary>");
+            sb.Append('\n').Append(indent).Append("/// ");
+            sb.Append('\n').Append(indent).Append("/// </summary>");
+
+            foreach (var p in paramNames)
+                sb.Append('\n').Append(indent).Append($"/// <param name=\"{p}\"></param>");
+
+            // <returns> for FUNCTION / METHOD only (not PROCEDURE / CONSTRUCTOR / DESTRUCTOR / ASSIGN / PROPERTY).
+            bool needsReturns = !string.IsNullOrEmpty(returnType)
+                && !string.Equals(returnType, "VOID", StringComparison.OrdinalIgnoreCase)
+                && (string.Equals(keyword, "FUNCTION",  StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(keyword, "METHOD",    StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(keyword, "ACCESS",    StringComparison.OrdinalIgnoreCase));
+
+            if (needsReturns)
+                sb.Append('\n').Append(indent).Append("/// <returns></returns>");
+
+            _logger.LogDebug("XmlDoc scaffold: keyword={Kw} params={Params} return={Ret}",
+                keyword, string.Join(",", paramNames), returnType);
+
+            return Task.FromResult<TextEditContainer?>(new TextEditContainer(new TextEdit
+            {
+                Range   = new LspRange(new Position(currentLine, 0),
+                                       new Position(currentLine, rawLine.Length)),
+                NewText = sb.ToString(),
+            }));
+        }
+
+        /// <summary>
+        /// Parses the first member declaration line encountered below the <c>///</c>,
+        /// returning the structural keyword, parameter names, and return type (if any).
+        /// </summary>
+        private static (string keyword, List<string> paramNames, string? returnType)
+            ParseMemberSignature(string lineText)
+        {
+            string remaining = SkipModifiers(lineText.TrimStart());
+            string kw = FirstKeyword(remaining);
+
+            bool isMember = false;
+            foreach (var mk in _memberKeywords)
+                if (string.Equals(mk, kw, StringComparison.OrdinalIgnoreCase)) { isMember = true; break; }
+
+            if (!isMember)
+                return (kw, new List<string>(), null);
+
+            // Extract parameter names from (…).
+            var paramNames = new List<string>();
+            int parenStart = remaining.IndexOf('(');
+            int parenEnd   = parenStart >= 0 ? FindClosingParen(remaining, parenStart) : -1;
+
+            if (parenEnd > parenStart)
+            {
+                foreach (var raw in remaining[(parenStart + 1)..parenEnd].Split(','))
+                {
+                    string pName = FirstKeyword(raw.Trim());
+                    if (!string.IsNullOrEmpty(pName))
+                        paramNames.Add(pName);
+                }
+            }
+
+            // Extract return type: look for "AS <type>" after the closing paren (or member name).
+            string searchIn = parenEnd >= 0 ? remaining[(parenEnd + 1)..] : remaining;
+            var m = _asTypeRegex.Match(searchIn);
+            string? returnType = m.Success ? m.Groups[1].Value : null;
+
+            return (kw, paramNames, returnType);
+        }
+
+        private static string SkipModifiers(string text)
+        {
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                foreach (var mod in _modifiers)
+                {
+                    if (text.StartsWith(mod + " ",  StringComparison.OrdinalIgnoreCase)
+                     || text.StartsWith(mod + "\t", StringComparison.OrdinalIgnoreCase))
+                    {
+                        text    = text[mod.Length..].TrimStart();
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            return text;
+        }
+
+        private static int FindClosingParen(string text, int openIdx)
+        {
+            int depth = 0;
+            for (int i = openIdx; i < text.Length; i++)
+            {
+                if      (text[i] == '(') depth++;
+                else if (text[i] == ')') { if (--depth == 0) return i; }
+            }
+            return -1;
         }
 
         // ====================================================================

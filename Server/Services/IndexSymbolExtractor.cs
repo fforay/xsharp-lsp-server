@@ -279,6 +279,32 @@ namespace XSharpLanguageServer.Services
                 Walk(cm, filePath, lines, typeName, results, currentNamespace);
         }
 
+        /// <summary>
+        /// Scans upward from <paramref name="declarationLine"/> (0-based) and collects
+        /// contiguous <c>///</c> doc-comment lines immediately above the declaration.
+        /// Returns the joined XML fragment (without <c>///</c> prefixes), or <c>null</c>
+        /// when no doc comment is present.
+        /// </summary>
+        private static string? CollectXmlComments(string[] lines, int declarationLine)
+        {
+            var collected = new List<string>();
+
+            for (int i = declarationLine - 1; i >= 0; i--)
+            {
+                string t = lines[i].TrimEnd('\r').TrimStart();
+                if (!t.StartsWith("///", StringComparison.Ordinal)) break;
+
+                // Strip "/// " (with trailing space) or bare "///".
+                string content = t.Length > 3 && t[3] == ' ' ? t[4..] : t[3..];
+                collected.Add(content);
+            }
+
+            if (collected.Count == 0) return null;
+
+            collected.Reverse();
+            return string.Join("\n", collected);
+        }
+
         private static void WalkEnumMembers(
             XSharpParser.Enum_Context en,
             string filePath,
@@ -316,12 +342,16 @@ namespace XSharpLanguageServer.Services
             if (startLine < lines.Length)
                 sourcecode = lines[startLine].TrimEnd('\r').Trim();
 
+            // Collect /// XML doc comment lines immediately above the declaration.
+            string? xmlComments = CollectXmlComments(lines, startLine);
+
             results.Add(new WorkspaceSymbol
             {
                 Name        = name,
                 Kind        = kind,
                 ReturnType  = string.IsNullOrEmpty(returnType) ? null : returnType,
                 Sourcecode  = sourcecode,
+                XmlComments = xmlComments,
                 FileName    = filePath,
                 StartLine   = startLine,
                 StartCol    = startCol,
