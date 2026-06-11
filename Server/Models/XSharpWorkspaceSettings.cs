@@ -82,6 +82,15 @@ namespace XSharpLanguageServer.Models
         /// <summary>Indent preprocessor directives with surrounding code.</summary>
         public bool IndentPreprocessorLines { get; set; } = false;
 
+        // ── Hover settings ───────────────────────────────────────────────────
+        /// <summary>
+        /// When <c>true</c> (default), hovering over a built-in keyword (IF, RETURN,
+        /// CLASS, …) shows a one-line description tooltip.
+        /// Set to <c>false</c> to suppress keyword hover entirely.
+        /// Controlled by <c>xsharp.hoverKeywords</c> in VS Code settings.
+        /// </summary>
+        public bool HoverKeywords { get; set; } = true;
+
         // ── Formatting settings ───────────────────────────────────────────────
         /// <summary>Keyword case: None, Upper (default), Lower, Title.</summary>
         public string KeywordCase          { get; set; } = "Upper";

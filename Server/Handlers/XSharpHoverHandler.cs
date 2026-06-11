@@ -178,9 +178,10 @@ namespace XSharpLanguageServer.Handlers
             { "NAMEOF",      "Returns the name of a variable, type, or member as a string." },
             { "VOLATILE",    "Marks a field as volatile (reads/writes not cached by the CPU)." },
         };
-        private readonly XSharpDocumentService    _documentService;
-        private readonly XSharpDatabaseService    _dbService;
-        private readonly XSharpWorkspaceIndex     _workspaceIndex;
+        private readonly XSharpDocumentService       _documentService;
+        private readonly XSharpDatabaseService       _dbService;
+        private readonly XSharpWorkspaceIndex        _workspaceIndex;
+        private readonly XSharpConfigurationService  _configService;
         private readonly ILogger<XSharpHoverHandler> _logger;
 
         /// <summary>Initialises the handler. Called by the DI container.</summary>
@@ -188,11 +189,13 @@ namespace XSharpLanguageServer.Handlers
             XSharpDocumentService       documentService,
             XSharpDatabaseService       dbService,
             XSharpWorkspaceIndex        workspaceIndex,
+            XSharpConfigurationService  configService,
             ILogger<XSharpHoverHandler> logger)
         {
             _documentService = documentService;
             _dbService       = dbService;
             _workspaceIndex  = workspaceIndex;
+            _configService   = configService;
             _logger          = logger;
         }
 
@@ -230,7 +233,8 @@ namespace XSharpLanguageServer.Handlers
                 // ----------------------------------------------------------
                 // 1. Keyword dictionary — no DB required.
                 // ----------------------------------------------------------
-                if (_keywordDocs.TryGetValue(word, out string? kwDesc))
+                if (_configService.GetSettings().HoverKeywords
+                    && _keywordDocs.TryGetValue(word, out string? kwDesc))
                 {
                     return Task.FromResult<Hover?>(new Hover
                     {

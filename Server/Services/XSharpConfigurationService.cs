@@ -107,6 +107,7 @@ namespace XSharpLanguageServer.Services
                     PreprocessorSymbols = xsharp["preprocessorSymbols"]?.Value<string>() ?? GetSettings().PreprocessorSymbols,
                     SemanticDiagnostics  = xsharp["semanticDiagnostics"]?.Value<bool>()   ?? GetSettings().SemanticDiagnostics,
                     WarnOnUndefinedCalls = xsharp["warnOnUndefinedCalls"]?.Value<bool>() ?? GetSettings().WarnOnUndefinedCalls,
+                    HoverKeywords        = xsharp["hoverKeywords"]?.Value<bool>()        ?? GetSettings().HoverKeywords,
                     // Indentation (maps to VS IndentingOptionsPage)
                     IndentCaseLabel         = xsharp["indentCaseLabel"]?.Value<bool>()         ?? xsharp["indentCase"]?.Value<bool>()         ?? GetSettings().IndentCaseLabel,
                     IndentCaseContent       = xsharp["indentCaseContent"]?.Value<bool>()       ?? GetSettings().IndentCaseContent,
