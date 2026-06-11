@@ -7,6 +7,7 @@ using OmniSharp.Extensions.LanguageServer.Protocol.Document;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using XSharp.Parser;
@@ -47,21 +48,27 @@ namespace XSharpLanguageServer.Handlers
             _logger = logger;
         }
 
+        // Reusable modifier array for tokens inside inactive #ifdef branches.
+        private static readonly string[] _inactiveMod = new[] { "inactive" };
+
         /// <summary>
         /// Declares the semantic token legend (the ordered list of token type and
         /// modifier strings) negotiated with the client during initialisation.
-        /// We mirror the client's own capability lists so the indices always align.
+        /// We extend the client's modifier list with our custom "inactive" modifier
+        /// (used to dim tokens inside false <c>#ifdef</c> branches).
         /// </summary>
         protected override SemanticTokensRegistrationOptions CreateRegistrationOptions(
             SemanticTokensCapability capability,
             ClientCapabilities clientCapabilities)
         {
-            // The legend must match exactly what we pass to SemanticTokensBuilder.Push().
-            // Using the client's own lists guarantees the indices are consistent.
+            // Append our custom "inactive" modifier so the builder can encode it.
+            // The client uses the legend we return here — not its own capability list —
+            // to decode the token stream, so the extra entry is safe to add.
             var legend = new SemanticTokensLegend
             {
                 TokenTypes = capability.TokenTypes,
-                TokenModifiers = capability.TokenModifiers
+                TokenModifiers = new Container<SemanticTokenModifier>(
+                    capability.TokenModifiers.Concat(new[] { new SemanticTokenModifier("inactive") }))
             };
 
             return new SemanticTokensRegistrationOptions
@@ -106,6 +113,21 @@ namespace XSharpLanguageServer.Handlers
                 {
                     _logger.LogWarning("No text cached for {Uri}", uri);
                     return;
+                }
+
+                // Collect inactive lines from the full parse (project defines evaluated).
+                // The preprocessor puts tokens inside false #ifdef branches on DEFOUTCHANNEL.
+                // We use line numbers (1-based) as the bridge between the two streams.
+                var inactiveLines = new HashSet<int>();
+                if (_documentService.TryGetParsed(uri, out var parsed)
+                    && parsed.TokenStream is BufferedTokenStream parsedStream)
+                {
+                    parsedStream.Fill();
+                    foreach (IToken tok in parsedStream.GetTokens())
+                    {
+                        if (tok.Channel == XSharpLexer.DEFOUTCHANNEL)
+                            inactiveLines.Add(tok.Line);
+                    }
                 }
 
                 // Re-lex with stddefs disabled so the preprocessor does not replace
@@ -199,7 +221,8 @@ namespace XSharpLanguageServer.Handlers
                     // Skip synthetic or malformed tokens.
                     if (line < 0 || len <= 0) continue;
 
-                    builder.Push(line, col, len, tokenType, Array.Empty<string>());
+                    var mods = inactiveLines.Contains(token.Line) ? _inactiveMod : Array.Empty<string>();
+                    builder.Push(line, col, len, tokenType, mods);
                 }
             }
             catch (OperationCanceledException)
