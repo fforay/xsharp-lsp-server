@@ -4,6 +4,22 @@ All notable changes to the XSharp Language Server will be documented in this fil
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.6.8] - 2026-06-11
+
+### Added
+- **Document highlight** (`textDocument/documentHighlight`) — new `XSharpDocumentHighlightHandler`; extracts the word under the cursor, live-scans the open document via `FindTokenLocations()`, and falls back to the workspace index for closed files; returns all occurrences with `DocumentHighlightKind.Text`.  Keyword pair boundaries are returned as `DocumentHighlightKind.Write` (kind 3) so the VS Code extension can apply a distinct decoration.
+- **Keyword pair highlighting** (P2-1) — `TryKeywordPairHighlights()` walks the parse tree to find the innermost structural context when the cursor is on a structural keyword; all boundary tokens are returned in a single `DocumentHighlight[]` response.  Sixteen context types covered: `IF`/`ELSEIF`/`ELSE`/`ENDIF`, `FOR`/`NEXT`, `FOREACH`/`NEXT`, `WHILE`/`ENDDO`, `DO WHILE`/`ENDDO`, `REPEAT`/`UNTIL`, `DO CASE`/`CASE`/`OTHERWISE`/`ENDCASE`, `SWITCH`/`CASE`/`OTHERWISE`/`END SWITCH`, `TRY`/`CATCH`/`FINALLY`/`ENDTRY`, `BEGIN SEQUENCE`/`RECOVER`/`END SEQUENCE`, `CLASS`/`ENDCLASS`, `INTERFACE`/`END INTERFACE`, `STRUCTURE`/`END STRUCTURE`, `ENUM`/`END ENUM`, `NAMESPACE`/`END NAMESPACE`, `VOSTRUCT`/`END`, `WITH`/`END WITH`.  Two-token closers (e.g. `END IF`, `END CLASS`) are handled by locating the companion keyword on the same closing line.
+- **Snippet completions** (P1-2) — `BuildSnippetItems()` in `XSharpCompletionHandler` provides 30 structured completions ported from the XSharp LanguageService snippet files: `IF`, `IF ELSE`, `FOR`, `FOREACH`, `DO WHILE`, `WHILE`, `REPEAT`, `TRY`/`CATCH`/`FINALLY`, `BEGIN SEQUENCE`, `CLASS`, `INTERFACE`, `STRUCTURE`, `VOSTRUCT`, `PROPERTY`, `SWITCH`, `DO CASE`, `#region`, `#ifdef`, `#ifndef`, and function starters (`start`, `initproc`, `exitproc`).  Snippets are injected before the keyword pass so snippet variants win; `FilterText` enables multi-word labels (e.g. `IF ELSE` shows when typing `IF`).
+- **INHERIT / IMPLEMENTS context completion** (P1-3) — `DetectInheritContext()` in `XSharpCompletionHandler` scans the current line backward, strips already-typed names, and recognises `INHERIT` / `IMPLEMENTS` keywords; the early-return branch serves only `Class` (kind 1) or `Interface` (kind 8) symbols from the workspace index and assembly database.
+- **Code action — Implement interface** (P3-2) — `ComputeImplementInterfaceActions()` in `XSharpCodeActionHandler`; reads `_Implements` from the parse-tree class context; performs two-tier member lookup (workspace `GetMembersOf` → `FindAssemblyMembersOf`); generates `METHOD`, `PROPERTY` (GET + SET), and `EVENT` stubs via `GenerateMemberStub()`; infers body indentation from existing class content; inserts stubs before `END CLASS`.
+- **`xsharp.hoverKeywords` setting** — new `HoverKeywords` property in `XSharpWorkspaceSettings` (default `true`).  When `false`, hovering over a built-in keyword (`IF`, `RETURN`, `CLASS`, …) produces no tooltip; symbol and local-variable hover are unaffected.  Read in `XSharpConfigurationService.Apply()`; `XSharpHoverHandler` injects `XSharpConfigurationService` and guards the keyword-lookup step with the flag.
+
+### Improved
+- **Hover for local variables** (P2-2) — `XSharpHoverHandler` now calls `XSharpTypeResolver.FindLocalVarHover()` after a failed keyword/symbol lookup; resolves the word as a `LOCAL`, `VAR`, or parameter declaration and returns a hover card of the form `LOCAL x AS SomeType` or `PARAM x AS SomeType`.
+
+### Fixed
+- **Keyword pair highlight persistence** — VS Code's built-in word-occurrence highlighter (300 ms debounce) was overriding the LSP `documentHighlight` response for keywords with an empty result, causing the "flicker and disappear" behaviour.  The fix is two-part: (1) keyword pair highlights now use `DocumentHighlightKind.Write` (kind 3) so the VS Code extension can distinguish them from identifier occurrences; (2) the VS Code extension uses a custom cursor-change listener (bypassing VS Code's provider pipeline) and disables the built-in occurrence highlighter for XSharp files — see extension changelog.
+
 ## [0.6.7] - 2026-06-10
 
 ### Fixed

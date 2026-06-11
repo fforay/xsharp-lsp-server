@@ -18,8 +18,9 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Document symbols** — hierarchical outline of all declared entities (namespaces, classes, interfaces, structs, enums, functions, methods, properties, events, fields, …) for the outline panel and `Ctrl+Shift+O` navigation (`textDocument/documentSymbol`)
 - **Folding ranges** — collapse type declarations, member declarations, control-flow blocks (`IF`, `FOR`, `FOREACH`, `WHILE`, `REPEAT`, `DO`/`DO WHILE`/`DO CASE`, `SWITCH`, `TRY`, `WITH`), `#region`/`#endregion` pairs, and multi-line comments (`textDocument/foldingRange`)
 - **Selection range** — smart expand / shrink selection following XSharp block structure (Alt+Shift+→ in VS Code) (`textDocument/selectionRange`)
-- **Completion** — keywords + document symbols + cross-file workspace index lookup; DB queried as assembly-only fallback; member completion after `.` and `:` with local type inference, assembly member reflection (`STRING:Length`, `INT:ToString()`, etc.), and chained call return-type resolution (`GetFoo():Bar`) (`textDocument/completion`)
-- **Hover** — prototype and XML doc comments for the symbol under the cursor; workspace index queried first, IntelliSense database as fallback (`textDocument/hover`)
+- **Completion** — keywords + document symbols + cross-file workspace index lookup; DB queried as assembly-only fallback; member completion after `.` and `:` with local type inference, assembly member reflection (`STRING:Length`, `INT:ToString()`, etc.), and chained call return-type resolution (`GetFoo():Bar`); 30 code snippets for control-flow and type declarations (`IF ELSE`, `FOR`, `FOREACH`, `TRY`, `CLASS`, `PROPERTY`, `DO CASE`, `#region`, …); `INHERIT` / `IMPLEMENTS` context filtering narrows the list to class or interface types only (`textDocument/completion`)
+- **Hover** — prototype and XML doc comments for the symbol under the cursor; workspace index queried first, IntelliSense database as fallback; local variable and parameter declarations shown as `LOCAL x AS Type` / `PARAM x AS Type`; keyword hover can be disabled with `xsharp.hoverKeywords` (`textDocument/hover`)
+- **Document highlight** — highlights all occurrences of the identifier under the cursor across the open document; when the cursor is on a structural keyword (`IF`, `FOR`, `CLASS`, …), all matching pair boundaries (`ENDIF`, `NEXT`, `ENDCLASS`, …) are highlighted with a distinct "strong" decoration; 16 context types covered (`textDocument/documentHighlight`)
 - **Go to definition** — jumps to the declaration in workspace source files or, for assembly symbols, to the DB entry (`textDocument/definition`)
 - **Signature help** — parameter hints for all overloads of a function call (`textDocument/signatureHelp`)
 - **Find references** — locates all usages across the entire project via the workspace token index (not limited to open documents); declaration sites also returned when requested (`textDocument/references`)
@@ -31,7 +32,7 @@ The server uses the official `XSharp.VSParser.dll` lexer/parser from the XSharp 
 - **Inlay hints** — parameter name annotations at call sites (`textDocument/inlayHint`)
 - **Workspace symbols** — symbol search across all project source files (`workspace/symbol`)
 - **Call hierarchy** — navigate callers and callees of any function or method; uses the workspace index for full-project search (`callHierarchy/prepare`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`)
-- **Code actions** — *Add USING*: inserts a missing `USING` directive; *Fix keyword casing*: corrects keyword case to match the configured `KeywordCase` setting (`textDocument/codeAction`)
+- **Code actions** — *Add USING*: inserts a missing `USING` directive; *Fix keyword casing*: corrects keyword case to match the configured `KeywordCase` setting; *Implement interface*: generates `METHOD`, `PROPERTY`, and `EVENT` stubs for all missing interface members; *Extract to function / method*, *Introduce variable*, *Inline variable* (`textDocument/codeAction`)
 - **Configurable dialect, include paths, preprocessor symbols, and standard definitions** — read from `workspace/didChangeConfiguration` (`xsharp.dialect`, `xsharp.includePaths`, `xsharp.preprocessorSymbols`, `xsharp.standardDefs`); changes trigger a full reparse; all options are passed directly to `XSharpParseOptions.FromVsValues` using the bare-name form required by the internal argument parser
 - **Project settings auto-detection** — on startup `XSharpWorkspaceScanner` reads the workspace `.xsproj` and extracts `<Dialect>`, `<IncludePaths>`, and `<StandardDefs>` as defaults for any field not already set by the client; FoxPro projects are typically configured automatically without manual VS Code settings
 - **Auto-reconnect to IntelliSense database** — a `FileSystemWatcher` monitors the `.vs/` subtree for `X#Model.xsdb` Created/Changed events and reconnects automatically when VS flushes a new copy or when the file first appears after startup
@@ -60,6 +61,7 @@ XSharpLanguageServer/
 │   ├── XSharpSelectionRangeHandler.cs
 │   ├── XSharpCompletionHandler.cs
 │   ├── XSharpHoverHandler.cs
+│   ├── XSharpDocumentHighlightHandler.cs
 │   ├── XSharpGoToDefinitionHandler.cs
 │   ├── XSharpSignatureHelpHandler.cs
 │   ├── XSharpDidChangeConfigurationHandler.cs
@@ -115,7 +117,8 @@ XSharpLanguageServer/
 | `XSharpFoldingRangeHandler` | `.Handlers` | Derives fold ranges from parse tree nodes, `#region`/`#endregion` pairs, and multi-line comments |
 | `XSharpSelectionRangeHandler` | `.Handlers` | Returns nested selection ranges following XSharp block structure |
 | `XSharpCompletionHandler` | `.Handlers` | Keywords + workspace index + DB assembly fallback; local type inference for member completion |
-| `XSharpHoverHandler` | `.Handlers` | Prototype + XML doc comment; workspace index first, DB assembly fallback |
+| `XSharpHoverHandler` | `.Handlers` | Prototype + XML doc comment + local-variable type; workspace index first, DB assembly fallback; keyword hover gated by `HoverKeywords` setting |
+| `XSharpDocumentHighlightHandler` | `.Handlers` | Identifier occurrences in open document + workspace index; keyword pair boundaries via parse-tree walk (kind = `Write` for pairs) |
 | `XSharpGoToDefinitionHandler` | `.Handlers` | Declaration lookup in workspace index; DB for assembly symbols |
 | `XSharpSignatureHelpHandler` | `.Handlers` | All overloads of the enclosing call from the workspace index / DB |
 | `XSharpDidChangeConfigurationHandler` | `.Handlers` | Applies updated workspace settings and triggers a full reparse |
@@ -134,7 +137,7 @@ XSharpLanguageServer/
 | `WorkspaceSymbol` | `.Models` | DTO for workspace index symbols |
 | `IdentifierLocation` | `.Models` | Token location entry in the per-file identifier map |
 | `XSharpSymbolKind` | `.Models` | Symbol kind enum used by the workspace index |
-| `XSharpWorkspaceSettings` | `.Models` | DTO for all workspace configuration settings (dialect, include paths, standard-defs header, preprocessor symbols, indentation, keyword case, …) |
+| `XSharpWorkspaceSettings` | `.Models` | DTO for all workspace configuration settings (dialect, include paths, standard-defs header, preprocessor symbols, indentation, keyword case, `HoverKeywords`, …) |
 
 ### Parse pipeline
 
